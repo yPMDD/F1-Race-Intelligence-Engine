@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from typing import List
+import logging
+from nlp.agents.graph import run_f1_agent
 
+logger = logging.getLogger(__name__)
 from apps.api.schemas.race import Race, Driver, Lap
 from storage.postgres.models import RaceModel, DriverModel, LapModel
 from storage.postgres.database import get_db
@@ -57,5 +57,9 @@ def predict_race_result(race_id: int, db: Session = Depends(get_db)):
         f"Provide a predicted Top 10 with a brief reasoning for each driver."
     )
     
-    prediction = run_f1_agent(prompt)
+    try:
+        prediction = run_f1_agent(prompt)
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        prediction = "[AI] Unable to generate prediction at this time. Please try again later."
     return {"prediction": prediction}
