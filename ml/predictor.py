@@ -48,7 +48,7 @@ class F1Predictor:
             SELECT 
                 driver_id,
                 AVG(position) FILTER (WHERE recency <= 5) as momentum,
-                SUM(points) FILTER (WHERE year = 2025) as season_points
+                SUM(points) FILTER (WHERE year = 2026) as season_points
             FROM driver_stats
             GROUP BY driver_id
             """
@@ -72,7 +72,8 @@ class F1Predictor:
                 'track_history': 10.0, 
                 'season_points': d_stats['season_points'] if d_stats['season_points'] else 0.0,
                 'driver_idx': d_idx if d_idx is not None else -1,
-                'track_idx': track_idx
+                'track_idx': track_idx,
+                'reg_impact': 1.0 # Flag as 2026 Regulation Era
             })
         
         # 4. Batch Prediction

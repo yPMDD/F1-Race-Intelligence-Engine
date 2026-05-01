@@ -17,7 +17,7 @@ def precompute_2026_season():
         logger.info(f"Found {len(races)} races in the 2026 season.")
 
         for race in races:
-            # 2. Check if already predicted
+            # 2. Check if already predicted (Idempotent)
             exists = db.query(RacePrediction).filter(RacePrediction.race_id == race.id).first()
             if exists:
                 logger.info(f"Skipping {race.name} (Already cached)")
