@@ -45,4 +45,16 @@ class RaceCreate(RaceBase):
 class Race(RaceBase):
     id: int
     laps: List[Lap] = []
+    results: List['Result'] = []
+    model_config = ConfigDict(from_attributes=True)
+
+class ResultBase(BaseModel):
+    driver_id: str
+    position: int
+    points: float
+    status: str
+
+class Result(ResultBase):
+    id: int
+    race_id: int
     model_config = ConfigDict(from_attributes=True)

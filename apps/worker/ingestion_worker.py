@@ -9,7 +9,7 @@ import requests
 from datetime import datetime
 import psycopg2
 from storage.postgres.database import engine, SessionLocal
-from storage.postgres.models import Base, RaceModel, DriverModel, LapModel
+from storage.postgres.models import Base, RaceModel, DriverModel, LapModel, ResultModel
 import logging
 import pandas as pd
 
@@ -51,22 +51,47 @@ def fetch_and_store_structured_data(year: int, round_num: int):
         # Process Laps and Drivers
         laps_df = race_session.laps
         
-        for index, lap in laps_df.iterrows():
-            driver_number = str(lap['DriverNumber'])
-            driver_name = lap['Driver']
+        # Process Results (Classement)
+        results_df = race_session.results
+        for index, res in results_df.iterrows():
+            driver_name = res['Abbreviation']
+            driver_number = str(res['DriverNumber'])
             
-            # Upsert Driver
+            # Upsert Driver FIRST
             driver = session.query(DriverModel).filter_by(driver_id=driver_name).first()
             if not driver:
                 driver = DriverModel(
                     driver_id=driver_name,
                     number=int(driver_number) if driver_number.isdigit() else 0,
                     abbreviation=driver_name,
-                    name=driver_name, # We might need a better mapping later
-                    team_name=lap['Team']
+                    name=res['FullName'],
+                    team_name=res['TeamName']
                 )
                 session.add(driver)
                 session.commit()
+
+            # Upsert Result
+            result_record = session.query(ResultModel).filter_by(
+                race_id=race.id,
+                driver_id=driver_name
+            ).first()
+            
+            if result_record:
+                result_record.position = int(res['Position']) if pd.notnull(res['Position']) else 0
+                result_record.points = float(res['Points']) if pd.notnull(res['Points']) else 0.0
+                result_record.status = str(res['Status'])
+            else:
+                result_record = ResultModel(
+                    race_id=race.id,
+                    driver_id=driver_name,
+                    position=int(res['Position']) if pd.notnull(res['Position']) else 0,
+                    points=float(res['Points']) if pd.notnull(res['Points']) else 0.0,
+                    status=str(res['Status'])
+                )
+                session.add(result_record)
+        
+        for index, lap in laps_df.iterrows():
+            driver_name = lap['Driver']
             
             # Convert timedelta to ms safely
             def to_ms(td):
@@ -112,7 +137,39 @@ def fetch_unstructured_document():
 
 if __name__ == "__main__":
     init_db()
-    # Ingest 2023 Bahrain Grand Prix
-    fetch_and_store_structured_data(2023, 1)
-    # Download sample document
-    fetch_unstructured_document()
+    
+    # Season Ingestion: All races starting from 2024
+    years_to_ingest = [2024, 2025, 2026] 
+    for year in years_to_ingest:
+        logger.info(f"--- SYNCING CALENDAR FOR {year} SEASON ---")
+        try:
+            schedule = fastf1.get_event_schedule(year)
+            for _, event in schedule.iterrows():
+                if event['EventFormat'] == 'testing': continue # Skip testing
+                
+                round_num = int(event['RoundNumber'])
+                if round_num == 0: continue
+                
+                # Check/Create Race Entry (Metadata Only)
+                db = SessionLocal()
+                race = db.query(RaceModel).filter_by(year=year, round_num=round_num).first()
+                if not race:
+                    race = RaceModel(
+                        year=year,
+                        round_num=round_num,
+                        name=event['EventName'],
+                        date=event['Sessions'][-1]['Date'] if 'Sessions' in event else event['EventDate']
+                    )
+                    db.add(race)
+                    db.commit()
+                    logger.info(f"Race synced: {year} {race.name}")
+                db.close()
+
+                # Now attempt to ingest deep telemetry if the race is in the past
+                if race.date < datetime.now():
+                    fetch_and_store_structured_data(year, round_num)
+                    
+        except Exception as e:
+            logger.error(f"Failed to sync {year} season: {e}")
+    
+    logger.info("Calendar sync and history ingestion complete!")

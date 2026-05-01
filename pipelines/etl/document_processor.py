@@ -22,49 +22,63 @@ def process_documents():
         logger.error(f"Raw data directory '{RAW_DATA_DIR}' does not exist.")
         return
 
-    logger.info(f"Loading PDFs from {RAW_DATA_DIR}...")
-    loader = PyPDFDirectoryLoader(RAW_DATA_DIR)
-    documents = loader.load()
+    import shutil
+    if os.path.exists(CHROMA_DIR):
+        logger.info(f"Clearing existing ChromaDB at {CHROMA_DIR}...")
+        shutil.rmtree(CHROMA_DIR)
+        
+    all_chunks = []
+    
+    # Process each year subdirectory
+    for year_dir in os.listdir(RAW_DATA_DIR):
+        year_path = os.path.join(RAW_DATA_DIR, year_dir)
+        if not os.path.isdir(year_path):
+            continue
+            
+        logger.info(f"Loading PDFs for Year {year_dir} from {year_path}...")
+        loader = PyPDFDirectoryLoader(year_path)
+        documents = loader.load()
 
-    if not documents:
-        logger.warning(f"No documents found in {RAW_DATA_DIR}. Please add FIA PDFs.")
+        if not documents:
+            logger.warning(f"No documents found in {year_path}.")
+            continue
+
+        import re
+        def clean_text(text):
+            text = re.sub(r'(\d)\s+(\d)(?=kg|mm|cm|km|m/s|kW|V|A)', r'\1\2', text)
+            text = text.replace('− ', '-')
+            return text
+
+        for doc in documents:
+            doc.page_content = clean_text(doc.page_content)
+            # Add year metadata
+            doc.metadata['year'] = int(year_dir) if year_dir.isdigit() else 2026
+        
+        # Split documents into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+        )
+        year_chunks = text_splitter.split_documents(documents)
+        all_chunks.extend(year_chunks)
+        logger.info(f"Generated {len(year_chunks)} chunks for {year_dir}.")
+
+    if not all_chunks:
+        logger.error("No chunks generated from any directory.")
         return
-
-    logger.info(f"Loaded {len(documents)} pages. Cleaning and splitting text...")
-    
-    import re
-    def clean_text(text):
-        # Fix split numbers followed by units: "72 6kg" -> "726kg"
-        text = re.sub(r'(\d)\s+(\d)(?=kg|mm|cm|km|m/s|kW|V|A)', r'\1\2', text)
-        # Fix common PDF hyphenation issues
-        text = text.replace('− ', '-')
-        return text
-
-    for doc in documents:
-        doc.page_content = clean_text(doc.page_content)
-    
-    # Split documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-        is_separator_regex=False,
-    )
-    chunks = text_splitter.split_documents(documents)
-    logger.info(f"Generated {len(chunks)} text chunks.")
 
     logger.info(f"Initializing HuggingFace embeddings ({EMBEDDING_MODEL})...")
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-    logger.info(f"Upserting chunks into ChromaDB at {CHROMA_DIR}...")
-    # Initialize Chroma and add documents (this creates/updates the persistent DB)
+    logger.info(f"Upserting {len(all_chunks)} chunks into ChromaDB at {CHROMA_DIR}...")
     vectorstore = Chroma.from_documents(
-        documents=chunks, 
+        documents=all_chunks, 
         embedding=embeddings, 
         persist_directory=CHROMA_DIR
     )
     
-    logger.info("RAG ingestion complete!")
+    logger.info("Multi-year RAG ingestion complete!")
 
 if __name__ == "__main__":
     process_documents()

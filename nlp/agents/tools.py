@@ -14,16 +14,22 @@ CHROMA_DIR = "data/chroma"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 @tool
-def query_2026_regulations(query: str) -> str:
+def query_f1_regulations(query: str, year: int = None) -> str:
     """
-    Search the official 2026 FIA F1 Technical and Sporting Regulations for answers 
-    to questions about rules, technical specifications, and penalties.
+    Search the FIA Formula 1 Technical and Sporting Regulations for specific rules.
+    Use this to clarify technical specifications, weight limits, or sporting procedures.
+    If a specific year (e.g., 2024, 2025, 2026) is provided, it will prioritize that year.
     """
-    logger.info(f"Agent tool: querying 2026 regulations for '{query}'")
+    logger.info(f"Agent tool: querying regulations for '{query}' (Year: {year})")
     try:
         embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
         vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-        docs = vectorstore.similarity_search(query, k=3)
+        
+        kwargs = {"k": 5}
+        if year:
+            kwargs["filter"] = {"year": year}
+            
+        docs = vectorstore.similarity_search(query, **kwargs)
         
         context = "\n\n".join([f"Source: {d.metadata.get('source')}\nContent: {d.page_content}" for d in docs])
         return context
@@ -31,28 +37,81 @@ def query_2026_regulations(query: str) -> str:
         return f"Error querying regulations: {str(e)}"
 
 @tool
-def get_race_telemetry_summary(driver_name: str) -> str:
+def get_track_history(track_name: str) -> str:
     """
-    Retrieve the latest race telemetry and timing summary for a specific driver 
-    from the SQL database. Includes lap times and team information.
+    Retrieve historical podiums and winners for a specific track across all ingested seasons.
+    Use this to identify which drivers/teams historically perform well at this circuit.
     """
-    logger.info(f"Agent tool: getting telemetry for {driver_name}")
+    logger.info(f"Agent tool: getting track history for {track_name}")
     db: Session = SessionLocal()
     try:
-        # Simple fuzzy search for driver
-        driver = db.query(DriverModel).filter(DriverModel.name.ilike(f"%{driver_name}%")).first()
-        if not driver:
-            return f"Driver '{driver_name}' not found in database."
-        
-        # Get latest laps for this driver
-        laps = db.query(LapModel).filter(LapModel.driver_id == driver.driver_id).order_by(LapModel.lap_number.desc()).limit(5).all()
-        
-        if not laps:
-            return f"No telemetry data found for {driver.name} (Team: {driver.team_name})."
+        # Find all races at this track
+        races = db.query(RaceModel).filter(RaceModel.name.ilike(f"%{track_name}%")).all()
+        if not races:
+            return f"No historical data found for track '{track_name}'."
             
-        summary = f"Driver: {driver.name}\nTeam: {driver.team_name}\nLatest Laps:\n"
-        for lap in laps:
-            summary += f"- Lap {lap.lap_number}: {lap.lap_time_ms/1000.0 if lap.lap_time_ms else 'N/A'}s (S1: {lap.sector1_ms/1000.0 if lap.sector1_ms else 'N/A'}s, S2: {lap.sector2_ms/1000.0 if lap.sector2_ms else 'N/A'}s, S3: {lap.sector3_ms/1000.0 if lap.sector3_ms else 'N/A'}s)\n"
+        summary = f"--- Historical Performance: {track_name} ---\n"
+        from storage.postgres.models import ResultModel
+        
+        for race in sorted(races, key=lambda x: x.year, reverse=True):
+            if race.year >= 2026: continue # Skip future/current
+            
+            top_3 = db.query(ResultModel).filter(ResultModel.race_id == race.id).order_by(ResultModel.position).limit(3).all()
+            if top_3:
+                summary += f"\nSeason {race.year}:\n"
+                for res in top_3:
+                    summary += f"- P{res.position}: {res.driver_id} (Status: {res.status})\n"
+                    
+        return summary
+    except Exception as e:
+        return f"Error retrieving track history: {str(e)}"
+    finally:
+        db.close()
+
+@tool
+def get_race_telemetry_summary(year: int, race_name: str, driver_name: str = None) -> str:
+    """
+    Retrieve race results and telemetry summaries for a specific year and race.
+    If driver_name is provided, it focus on that driver's laps.
+    Otherwise, it returns the top classification (podium) and general race info.
+    """
+    logger.info(f"Agent tool: getting telemetry for {year} {race_name} (Driver: {driver_name})")
+    db: Session = SessionLocal()
+    try:
+        # Find Race
+        race = db.query(RaceModel).filter(
+            RaceModel.year == year,
+            RaceModel.name.ilike(f"%{race_name}%")
+        ).first()
+        
+        if not race:
+            return f"Race '{race_name}' in {year} not found in database."
+        
+        # Get Podium
+        from storage.postgres.models import ResultModel
+        results = db.query(ResultModel).filter(ResultModel.race_id == race.id).order_by(ResultModel.position).limit(3).all()
+        
+        summary = f"--- {race.year} {race.name} Summary ---\n"
+        summary += "Podium:\n"
+        for res in results:
+            summary += f"- P{res.position}: {res.driver_id} ({res.points} pts) - Status: {res.status}\n"
+            
+        if driver_name:
+            # Get driver's laps
+            driver = db.query(DriverModel).filter(DriverModel.driver_id.ilike(f"%{driver_name}%")).first()
+            if driver:
+                laps = db.query(LapModel).filter(
+                    LapModel.race_id == race.id, 
+                    LapModel.driver_id == driver.driver_id
+                ).order_by(LapModel.lap_number).all()
+                
+                if laps:
+                    times = [l.lap_time_ms for l in laps if l.lap_time_ms]
+                    avg_lap = sum(times)/len(times) if times else 0
+                    summary += f"\nDriver {driver.name} Analysis:\n"
+                    summary += f"- Total Laps: {len(laps)}\n"
+                    summary += f"- Average Lap: {avg_lap/1000.0:.3f}s\n"
+                    summary += f"- Best Lap: {min(times)/1000.0:.3f}s\n"
             
         return summary
     except Exception as e:

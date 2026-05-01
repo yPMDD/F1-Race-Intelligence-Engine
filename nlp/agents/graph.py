@@ -3,7 +3,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from nlp.agents.tools import query_2026_regulations, get_race_telemetry_summary
+from nlp.agents.tools import query_f1_regulations, get_race_telemetry_summary, get_track_history
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ llm = ChatOllama(
 )
 
 # Bind tools to the LLM
-tools = [query_2026_regulations, get_race_telemetry_summary]
+tools = [query_f1_regulations, get_race_telemetry_summary, get_track_history]
 llm_with_tools = llm.bind_tools(tools)
 
 # Define the logic for the agent node
@@ -71,11 +71,14 @@ def run_f1_agent(query: str):
     logger.info(f"Running F1 Agent for query: {query}")
     from langchain_core.messages import SystemMessage
     system_prompt = SystemMessage(content=(
-        "You are the F1 Race Strategist AI, an expert in 2026 FIA Technical and Sporting Regulations. "
-        "When answering questions, prioritize accuracy and technical precision. "
-        "CRITICAL: PDF parsing can sometimes introduce errors like spaces in numbers (e.g., '72 6kg' instead of '726kg'). "
-        "Use your domain knowledge to perform sanity checks: an F1 car should weigh around 700-800kg, not 70kg. "
-        "If you encounter a value that seems physically impossible, correct it based on context or mention the discrepancy."
+        "You are the F1 Intelligence Engine Strategist. You have access to real telemetry and FIA regulations for 2024, 2025, and 2026. "
+        "Your goal is to provide deep, comparative insights. "
+        "GUIDELINES: "
+        "1. To compare rules across years, YOU MUST CALL 'query_f1_regulations' MULTIPLE TIMES (once for each year you are comparing). "
+        "2. Do NOT assume rules are the same. For example, DRS is replaced by Active Aero in 2026. "
+        "3. To analyze performance, use 'get_race_telemetry_summary' for specific races (e.g., year=2024, race_name='Bahrain'). "
+        "4. If a user asks about 'Bahrain telemetry', look up the data first. "
+        "5. Correct physical impossibilities (e.g., car weight 72kg -> 726kg)."
     ))
     inputs = {"messages": [system_prompt, HumanMessage(content=query)]}
     config = {"configurable": {"thread_id": "f1_session"}}

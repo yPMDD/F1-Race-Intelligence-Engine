@@ -13,6 +13,7 @@ class RaceModel(Base):
     date = Column(DateTime)
 
     laps = relationship("LapModel", back_populates="race", cascade="all, delete-orphan")
+    results = relationship("ResultModel", back_populates="race", cascade="all, delete-orphan")
 
 class DriverModel(Base):
     __tablename__ = "drivers"
@@ -38,3 +39,15 @@ class LapModel(Base):
     compound = Column(String, nullable=True)
 
     race = relationship("RaceModel", back_populates="laps")
+
+class ResultModel(Base):
+    __tablename__ = "results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    race_id = Column(Integer, ForeignKey("races.id"))
+    driver_id = Column(String, ForeignKey("drivers.driver_id"))
+    position = Column(Integer)
+    points = Column(Float)
+    status = Column(String) # e.g. "Finished", "DNF", "+1 Lap"
+
+    race = relationship("RaceModel", back_populates="results")
