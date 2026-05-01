@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@font-face {
+    font-family: 'Formula1';
+    src: url('./assets/fonts/Formula1-Regular.woff') format('woff');
+    font-weight: normal;
+    font-style: normal;
+}
+
+@font-face {
+    font-family: 'Formula1 Bold';
+    src: url('./assets/fonts/Formula1-Bold.woff') format('woff');
+    font-weight: bold;
+    font-style: normal;
+}
+
+@theme {
+  --color-f1-red: #E10600;
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Formula1 Bold', sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-[#15151e] text-slate-300 font-sans antialiased min-h-screen selection:bg-f1-red selection:text-white;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display text-white;
+  }
+}
+
+@layer components {
+  /* Recharts Custom Overrides */
+  .recharts-cartesian-grid-horizontal line,
+  .recharts-cartesian-grid-vertical line {
+    @apply stroke-slate-800;
+  }
+  
+  .recharts-text {
+    @apply text-xs fill-slate-400;
+  }
+}

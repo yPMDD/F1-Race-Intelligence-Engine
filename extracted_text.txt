@@ -1,0 +1,196 @@
+F1 Race Intelligence Engine
+ Technical Architecture & System Design Report
+1. System Goal
+The system is designed as a modular Formula 1 intelligence platform that ingests structured race data,
+semi-structured event streams, and unstructured racing documents, then converts them into analytics,
+predictions, and grounded natural-language answers.
+2. End-to-End Architecture
+The architecture is divided into data ingestion, storage, feature engineering, NLP processing, vector retrieval,
+agentic orchestration, prediction services, API serving, and dashboard presentation. Each layer exposes explicit
+inputs and outputs so services can communicate through stable contracts rather than tight coupling.
+3. Communication Model
+Services communicate through a combination of REST APIs, database reads and writes, event messages, and
+shared artifact stores. Batch jobs write normalized tables and Parquet artifacts, streaming consumers update live
+state, the RAG service reads the document index, agents call internal tools and prediction endpoints, and the
+frontend consumes FastAPI endpoints.
+4. Hybrid Ingestion Layer
+Batch ingestion handles historical race data, qualifying results, lap times, pit stops, track metadata, driver profiles,
+and weather-linked context. Streaming ingestion simulates live race events such as lap completions, pit actions,
+sector updates, position changes, and safety car events using a message broker or event queue. Both pipelines
+converge into a canonical race schema so historical and live data can be queried consistently.
+5. ETL and Feature Engineering
+The ETL pipeline standardizes source data, validates schemas, resolves duplicates, aligns timestamps, and
+enriches each event with race-aware features. Feature engineering produces lap delta, stint length, tire
+degradation slope, pit gap, pace trend, position gain rate, track affinity, and race-state context. These features are
+stored both in PostgreSQL for operational access and in Parquet for offline analytics and training.
+6. NLP Layer
+The NLP layer processes Formula 1 regulations, strategy notes, race reports, news, and technical documents. A
+preprocessing pipeline performs cleaning, normalization, tokenization, sentence splitting, and chunking, then
+baseline vectorization methods like BoW and TF-IDF support classification and lexical retrieval. Transformer
+embeddings such as BERT-based representations support semantic similarity, contextual understanding,
+summarization, and text routing.
+7. RAG Layer
+The RAG subsystem ingests documents, attaches metadata, creates embeddings, stores them in a vector
+database, and retrieves relevant evidence at query time. Retrieved chunks are optionally reranked, then passed
+to the language model with source constraints so generated answers stay grounded. The RAG system is used for
+rule explanations, historical context, strategy reasoning, and question answering.
+8. Agentic Layer
+The agentic layer coordinates reasoning through specialized agents. A Strategy Agent evaluates race features to
+suggest pit windows and tactical moves, an Analytics Agent summarizes performance trends and anomaly
+patterns, and a RAG Agent answers rule and context questions from indexed sources. LangGraph-style
+orchestration maintains state, tool access, and controlled handoffs between agents.
+9. Prediction Layer
+
+
+The prediction layer consumes engineered features and outputs forecasts such as finishing position, pace
+advantage, pit strategy impact, and probability-based outcome estimates. Baseline models can start with
+interpretable tree-based methods before moving to more advanced sequence-aware models if needed.
+Predictions are versioned so they can be compared across experiments and race weekends.
+10. API Layer
+FastAPI exposes endpoints for ingestion triggers, analytics queries, prediction requests, RAG queries, and agent
+workflows. The API layer also supports authentication, request validation, and async execution for operations that
+involve multiple downstream services. It is the main integration point between the backend system and the
+dashboard or external clients.
+11. Dashboard Layer
+The dashboard provides a visual interface for race state, prediction outputs, driver comparisons, tire trends, pit
+strategy analytics, and RAG answers. It reads from FastAPI endpoints and cached summaries rather than
+querying every service directly. This keeps the UI responsive while preserving a clean separation between
+presentation and business logic.
+12. Reliability and Performance
+Redis is used for caching repeated race summaries, retrieval results, and expensive inference responses.
+Background jobs handle ingestion refreshes, embedding updates, and model retraining so the serving layer
+remains responsive. Logging, retries, validation, and schema checks make the system more robust and easier to
+debug.
+13. Deployment Strategy
+The project is containerized with Docker so each service can run independently or in a compose-based local
+stack. A VPS deployment can host the API, database, vector store, and dashboard in a controlled environment.
+This approach supports development, demos, and portfolio deployment without changing core service contracts.
+14. Conclusion
+The system demonstrates end-to-end AI engineering by combining data engineering, NLP, retrieval, agentic
+orchestration, prediction, and backend deployment into one coherent Formula 1 intelligence platform.
+
+
+Folder Structure
+f1-race-intelligence-engine/
+|-- apps/
+|   |-- api/
+|   |   |-- main.py
+|   |   |-- routers/
+|   |   |-- schemas/
+|   |   `-- dependencies.py
+|   |-- dashboard/
+|   |   |-- app.py
+|   |   `-- components/
+|   `-- worker/
+|       |-- ingestion_worker.py
+|       |-- embedding_worker.py
+|       `-- retrain_worker.py
+|-- data/
+|   |-- raw/
+|   |-- processed/
+|   |-- features/
+|   `-- external/
+|-- pipelines/
+|   |-- batch/
+|   |-- streaming/
+|   |-- etl/
+|   `-- feature_engineering/
+|-- nlp/
+|   |-- preprocessing/
+|   |-- vectorizers/
+|   |-- embeddings/
+|   `-- classifiers/
+|-- rag/
+|   |-- ingestion/
+|   |-- chunking/
+|   |-- retrieval/
+|   |-- reranking/
+|   `-- prompting/
+|-- agents/
+|   |-- strategy_agent.py
+|   |-- analytics_agent.py
+|   `-- rag_agent.py
+|-- models/
+|   |-- training/
+|   |-- evaluation/
+|   |-- inference/
+|   `-- artifacts/
+|-- storage/
+|   |-- postgres/
+|   |-- parquet/
+|   |-- vector_store/
+|   `-- cache/
+|-- configs/
+|   |-- app.yaml
+|   |-- db.yaml
+|   |-- dvc.yaml
+|   `-- logging.yaml
+|-- tests/
+|   |-- unit/
+|   |-- integration/
+|   `-- e2e/
+|-- docker/
+|   |-- api.Dockerfile
+|   |-- dashboard.Dockerfile
+|   `-- worker.Dockerfile
+|-- notebooks/
+`-- docs/
+System Schema
+
+
+Layer
+Core Entities
+Input
+Output
+Communication
+Ingestion
+Race, Driver, Team, Lap, PitStop, Event
+APIs, CSV, streams
+Canonical events
+REST, queue messages
+Storage
+Postgres tables, Parquet files, Vector index
+Canonical events
+Queryable data
+SQL, file reads
+Feature Engineering
+RaceState, StintMetrics, PaceMetrics, TrackStats
+Stored race data
+Feature tables
+SQL, jobs
+NLP
+Document, Chunk, Embedding, Label
+Text corpus
+Tokens, vectors, labels
+Python modules
+RAG
+Query, RetrievedChunk, Answer, Citation
+User question
+Grounded answer
+Vector DB, LLM API
+Agents
+StrategyTask, AnalyticsTask, RAGTask
+State + tools
+Action or response
+LangGraph state
+Prediction
+FeatureVector, Model, Forecast
+Feature tables
+Predictions
+API calls
+API/Dashboard
+Request, Response, Widget
+Client request
+Visuals / JSON
+HTTP/JSON
+Example Service Communication Flow
+1. The ingestion worker pulls race data from APIs and event streams.
+2. The ETL job validates, normalizes, and stores data in PostgreSQL and Parquet.
+3. The feature pipeline builds race-state features and writes them to the feature store.
+4. The NLP and RAG services index documents and embeddings.
+5. The agent layer queries features, RAG retrieval, and prediction endpoints.
+6. FastAPI returns JSON responses to the dashboard.
+7. Redis caches repeated outputs and improves latency.
+Resume-ready summary
+Built a modular F1 Race Intelligence Engine with hybrid batch/stream ingestion, DVC-tracked data pipelines, NLP
+and RAG services, agentic orchestration, race prediction models, and a FastAPI-driven analytics dashboard.
