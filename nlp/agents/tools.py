@@ -118,3 +118,23 @@ def get_race_telemetry_summary(year: int, race_name: str, driver_name: str = Non
         return f"Error retrieving telemetry: {str(e)}"
     finally:
         db.close()
+
+@tool
+def get_ml_prediction(track_name: str) -> str:
+    """
+    Execute the custom XGBoost ML model to predict the full finishing order for a specific track.
+    Use this as the mathematical baseline for your final classification.
+    """
+    logger.info(f"Agent tool: getting ML prediction for {track_name}")
+    try:
+        from ml.predictor import F1Predictor
+        predictor = F1Predictor()
+        results = predictor.predict_race_order(track_name)
+        
+        summary = f"ML_FORECAST|{track_name}\n"
+        for res in results:
+            summary += f"P{res['final_pos']}|{res['driver_id']}|{res['team']}|SCORE:{res['score']:.2f}\n"
+            
+        return summary
+    except Exception as e:
+        return f"Error running ML model: {str(e)}"

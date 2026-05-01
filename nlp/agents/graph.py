@@ -3,8 +3,11 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from nlp.agents.tools import query_f1_regulations, get_race_telemetry_summary, get_track_history
+from nlp.agents.tools import query_f1_regulations, get_race_telemetry_summary, get_track_history, get_ml_prediction
 import logging
+import json
+import re
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,7 @@ llm = ChatOllama(
 )
 
 # Bind tools to the LLM
-tools = [query_f1_regulations, get_race_telemetry_summary, get_track_history]
+tools = [query_f1_regulations, get_race_telemetry_summary, get_track_history, get_ml_prediction]
 llm_with_tools = llm.bind_tools(tools)
 
 # Define the logic for the agent node
@@ -29,6 +32,35 @@ def call_model(state: AgentState):
     logger.info("Agentic Node: calling model")
     messages = state['messages']
     response = llm_with_tools.invoke(messages)
+    
+    # --- Robust Manual Parsing Fallback ---
+    # If the model returned a JSON string in content but no formal tool_calls
+    if not response.tool_calls and response.content:
+        try:
+            # Look for JSON patterns like {"name": "...", "parameters": {...}}
+            matches = re.findall(r'\{.*"name".*"parameters".*\}', response.content, re.DOTALL)
+            for match in matches:
+                data = json.loads(match)
+                # Map common hallucinations to actual tool names
+                name_map = {
+                    "get_track_profile": "get_track_history", 
+                    "query_regulations": "query_f1_regulations",
+                    "get_telemetry": "get_race_telemetry_summary"
+                }
+                actual_name = name_map.get(data["name"], data["name"])
+                
+                # Check if it's one of our registered tools
+                if actual_name in [t.name for t in tools]:
+                    response.tool_calls.append({
+                        "name": actual_name,
+                        "args": data.get("parameters", data.get("args", {})),
+                        "id": f"manual_{uuid.uuid4().hex[:8]}",
+                        "type": "tool_call"
+                    })
+                    logger.info(f"Manual Tool Parse Success: {actual_name}")
+        except Exception as e:
+            logger.warning(f"Failed to manually parse tool call: {e}")
+            
     return {"messages": [response]}
 
 # Define the logic for the tool execution node
@@ -70,21 +102,29 @@ def run_f1_agent(query: str):
     """
     logger.info(f"Running F1 Agent for query: {query}")
     from langchain_core.messages import SystemMessage
+    from ml.config import GRID_2026
+    grid_str = "\n".join([f"- {d['driver_id']}: {d['name']} ({d['team']})" for d in GRID_2026])
+
     system_prompt = SystemMessage(content=(
-        "You are the F1 Intelligence Engine Strategist. You have access to real telemetry and FIA regulations for 2024, 2025, and 2026. "
-        "Your goal is to provide deep, comparative insights. "
-        "GUIDELINES: "
-        "1. To compare rules across years, YOU MUST CALL 'query_f1_regulations' MULTIPLE TIMES (once for each year you are comparing). "
-        "2. Do NOT assume rules are the same. For example, DRS is replaced by Active Aero in 2026. "
-        "3. To analyze performance, use 'get_race_telemetry_summary' for specific races (e.g., year=2024, race_name='Bahrain'). "
-        "4. If a user asks about 'Bahrain telemetry', look up the data first. "
-        "5. Correct physical impossibilities (e.g., car weight 72kg -> 726kg)."
+        "You are the F1 Intelligence Strategist (2026 Season). "
+        f"GRID:\n{grid_str}\n\n"
+        "TASKS:\n"
+        "1. INFO: Answer regs/history concisely using tools.\n"
+        "2. PREDICT: Call `get_ml_prediction` + `query_f1_regulations`. Output Top 10 Table ONLY.\n\n"
+        "RESPONSE FORMAT (PREDICTION ONLY):\n"
+        "# 🤖 AI STRATEGIC FORECAST\n> [!IMPORTANT]\n> ML + LLM Hybrid Prediction.\n"
+        "| Pos | Driver | Team | Confidence (%) | Strategy Notes |\n"
+        "| --- | --- | --- | --- | --- |\n\n"
+        "RULES: No retired drivers. No old teams. Use tool data only. Be brief."
     ))
     inputs = {"messages": [system_prompt, HumanMessage(content=query)]}
-    config = {"configurable": {"thread_id": "f1_session"}}
+    import uuid
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
     
     # Run the graph
     result = app.invoke(inputs, config=config)
     
     # Extract the final answer
-    return result["messages"][-1].content
+    final_message = result["messages"][-1]
+    return final_message.content if final_message.content else "AI strategist was unable to formulate a final result. Please check telemetry data."

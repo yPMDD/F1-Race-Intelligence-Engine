@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Flag, Activity, Clock, Zap, Database, Cpu, MessageSquare, Sparkles, Filter, ChevronDown, ListFilter, User, Brain } from 'lucide-react';
+import { Flag, Activity, Clock, Zap, Database, Cpu, MessageSquare, Sparkles, Filter, ChevronDown, ListFilter, User, Brain, AlertCircle } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import ChatSection from './components/ChatSection';
 
@@ -96,8 +96,27 @@ function App() {
   const currentDriverStats = laps.filter(l => l.driver_id === selectedDriver);
   const bestLap = currentDriverStats.length > 0 ? Math.min(...currentDriverStats.map(l => l.lap_time_ms)) : 0;
 
+  const parseMarkdownTable = (content) => {
+    if (!content) return null;
+    const lines = content.split('\n').filter(l => l.includes('|'));
+    if (lines.length < 3) return null; // Not enough for a table
+
+    // Extract headers (skip the |---| separator)
+    const headers = lines[0].split('|').filter(x => x.trim()).map(x => x.trim());
+    const data = lines.slice(2).map(line => {
+      const cells = line.split('|').filter(x => x.trim()).map(x => x.trim());
+      const row = {};
+      headers.forEach((h, i) => row[h] = cells[i]);
+      return row;
+    });
+
+    return { headers, data };
+  };
+
+  const predictionTable = parseMarkdownTable(prediction);
+
   return (
-    <div className="min-h-screen bg-[#0d0d12] text-slate-300 flex flex-col font-sans selection:bg-f1-red selection:text-white">
+    <div className="h-screen bg-[#0d0d12] text-slate-300 flex flex-col font-sans selection:bg-f1-red selection:text-white overflow-hidden">
       {/* Top Navbar */}
       <nav className="h-14 bg-[#15151e] border-b border-white/5 flex items-center justify-between px-6 shrink-0 sticky top-0 z-50">
         <div className="flex items-center gap-3">
@@ -173,14 +192,26 @@ function App() {
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 min-h-0">
           <div className="lg:col-span-8 flex flex-col gap-4 min-h-0">
-            <div className="bg-[#15151e] rounded-lg border border-white/5 shadow-2xl flex flex-col flex-1 min-h-[400px]">
+            <div className="bg-[#15151e] rounded-lg border border-white/5 shadow-2xl flex flex-col flex-[1.4] min-h-0">
               <div className="p-3 border-b border-white/5 flex items-center justify-between bg-white/[0.02]">
                 <div className="flex items-center gap-2">
                   <Activity size={14} className="text-f1-red" />
-                  <h2 className="text-xs font-bold text-white uppercase tracking-widest">Lap Performance Comparison</h2>
+                  <h2 className="text-xs font-bold text-white uppercase tracking-widest">
+                    {currentDriverStats.length > 0 ? "Lap Performance Comparison" : "Strategic Intelligence Dashboard"}
+                  </h2>
                 </div>
+                {currentDriverStats.length === 0 && (
+                   <button 
+                   onClick={handlePredict}
+                   disabled={predicting}
+                   className="flex items-center gap-1.5 px-3 py-1 bg-f1-red/10 hover:bg-f1-red/20 border border-f1-red/20 rounded text-[9px] font-black text-f1-red uppercase tracking-widest transition-all disabled:opacity-50"
+                 >
+                   {predicting ? <Cpu size={10} className="animate-spin" /> : <Sparkles size={10} />}
+                   {predicting ? "Simulating Strategy..." : "Run AI Prediction"}
+                 </button>
+                )}
               </div>
-              <div className="p-4 flex-1 flex items-center justify-center relative">
+              <div className="p-4 flex-1 flex flex-col relative overflow-hidden">
                 {currentDriverStats.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={currentDriverStats}>
@@ -191,89 +222,102 @@ function App() {
                       <Line type="monotone" dataKey="lap_time_ms" stroke="#ff1801" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
-                ) : (
-                  <div className="flex flex-col items-center gap-8">
-                    <div className="grid grid-cols-4 gap-4 text-center">
-                      {[['Days', timeLeft.days], ['Hours', timeLeft.hours], ['Mins', timeLeft.mins], ['Secs', timeLeft.secs]].map(([label, val]) => (
-                        <div key={label}>
-                          <div className="w-16 h-16 bg-[#0d0d12] rounded border border-white/5 flex items-center justify-center text-3xl font-black text-white">
-                            {val.toString().padStart(2, '0')}
-                          </div>
-                          <div className="text-[7px] font-bold text-slate-500 uppercase mt-2 tracking-widest">{label}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="flex flex-col items-center">
-                      <div className="flex items-center gap-2 mb-2">
-                         <div className="w-2 h-2 bg-f1-red rounded-full animate-ping"></div>
-                         <h3 className="text-sm font-black text-white tracking-[0.3em] uppercase italic">RACE COUNTDOWN</h3>
+                ) : predictionTable ? (
+                  <div className="flex-1 flex flex-col overflow-hidden">
+                    <div className="flex items-center gap-2 mb-4 bg-f1-red/10 border border-f1-red/20 p-3 rounded-lg shrink-0">
+                      <Brain size={16} className="text-f1-red" />
+                      <div>
+                        <div className="text-[10px] font-black text-white uppercase tracking-widest">AI Strategic Forecast Table</div>
+                        <div className="text-[8px] text-slate-500 uppercase font-bold">Hybrid ML-XGBoost + LLM Analysis</div>
                       </div>
-                      <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Session starting soon • Live telemetry pending</p>
                     </div>
+                    <div className="flex-1 overflow-y-auto custom-scrollbar border border-white/5 rounded">
+                      <table className="w-full text-left text-[10px] font-mono border-collapse">
+                        <thead className="bg-black/40 border-b border-white/10 text-slate-500 sticky top-0 z-20">
+                          <tr>
+                            {predictionTable.headers.map((h, i) => (
+                              <th key={i} className="p-3 uppercase tracking-tighter bg-[#15151e] z-10">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/[0.05]">
+                          {predictionTable.data.map((row, i) => (
+                            <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
+                              {predictionTable.headers.map((h, j) => (
+                                <td key={j} className={`p-3 ${j === 0 ? 'font-black text-f1-red text-xs' : 'text-slate-300'} ${j === 1 ? 'font-bold text-white' : ''}`}>
+                                  {row[h]}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-4 opacity-30 italic">
+                    <Database size={48} className="text-slate-700" />
+                    <p className="text-xs uppercase tracking-widest font-black">Waiting for Data or AI Simulation...</p>
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-[300px]">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 min-h-0">
               <div className="bg-[#15151e] rounded-lg border border-white/5 shadow-sm overflow-hidden flex flex-col">
                 <div className="p-3 border-b border-white/5 flex items-center justify-between bg-white/[0.02] shrink-0">
                   <div className="flex items-center gap-2">
-                    <Flag size={14} className="text-f1-red" />
-                    <h2 className="text-xs font-bold text-white uppercase tracking-widest">Race Classification</h2>
+                    {selectedRace?.results && selectedRace.results.length > 0 ? (
+                      <Flag size={14} className="text-f1-red" />
+                    ) : (
+                      <Clock size={14} className="text-f1-red" />
+                    )}
+                    <h2 className="text-xs font-bold text-white uppercase tracking-widest">
+                      {selectedRace?.results && selectedRace.results.length > 0 ? "Race Classification" : "Event Countdown"}
+                    </h2>
                   </div>
-                  {(!selectedRace?.results || selectedRace.results.length === 0) && (
-                    <button 
-                      onClick={handlePredict}
-                      disabled={predicting}
-                      className="flex items-center gap-1.5 px-2 py-1 bg-f1-red/10 hover:bg-f1-red/20 border border-f1-red/20 rounded text-[9px] font-black text-f1-red uppercase tracking-widest transition-all disabled:opacity-50"
-                    >
-                      {predicting ? <Cpu size={10} className="animate-spin" /> : <Sparkles size={10} />}
-                      {predicting ? "Simulating..." : "Predict Results"}
-                    </button>
-                  )}
                 </div>
                 <div className="flex-1 overflow-auto custom-scrollbar">
-                  {prediction ? (
-                    <div className="p-4 bg-f1-red/5 h-full">
-                       <div className="flex items-center gap-2 mb-3">
-                          <Brain size={12} className="text-f1-red" />
-                          <span className="text-[10px] font-black text-white uppercase tracking-widest">AI Strategic Forecast</span>
-                       </div>
-                       <div className="text-[10px] font-mono leading-relaxed text-slate-300 whitespace-pre-wrap">
-                          {prediction}
-                       </div>
-                    </div>
-                  ) : selectedRace?.results && selectedRace.results.length > 0 ? (
-                    <table className="w-full text-left text-[10px] font-mono">
-                      <thead className="bg-black/40 border-b border-white/5 text-slate-500 sticky top-0">
-                        <tr>
-                          <th className="p-2 uppercase tracking-tighter w-12 text-center">Pos</th>
-                          <th className="p-2 uppercase tracking-tighter">Driver</th>
-                          <th className="p-2 uppercase tracking-tighter text-right">Points</th>
-                          <th className="p-2 uppercase tracking-tighter text-right">Status</th>
+                {selectedRace?.results && selectedRace.results.length > 0 ? (
+                  <table className="w-full text-left text-[10px] font-mono">
+                    <thead className="bg-black/40 border-b border-white/5 text-slate-500 sticky top-0">
+                      <tr>
+                        <th className="p-2 uppercase tracking-tighter w-12 text-center">Pos</th>
+                        <th className="p-2 uppercase tracking-tighter">Driver</th>
+                        <th className="p-2 uppercase tracking-tighter text-right">Points</th>
+                        <th className="p-2 uppercase tracking-tighter text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/[0.02]">
+                      {selectedRace?.results?.sort((a,b) => a.position - b.position).map((res, i) => (
+                        <tr key={i} className={`hover:bg-white/[0.02] transition-colors ${res.position <= 3 ? 'bg-f1-red/5' : ''}`}>
+                          <td className="p-2 text-center font-bold text-white">{res.position}</td>
+                          <td className="p-2 text-white font-bold">{res.driver_id}</td>
+                          <td className="p-2 text-right text-slate-400">{res.points}</td>
+                          <td className="p-2 text-right"><span className="text-[8px] uppercase text-slate-500">{res.status}</span></td>
                         </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/[0.02]">
-                        {selectedRace?.results?.sort((a,b) => a.position - b.position).map((res, i) => (
-                          <tr key={i} className={`hover:bg-white/[0.02] transition-colors ${res.position <= 3 ? 'bg-f1-red/5' : ''}`}>
-                            <td className="p-2 text-center font-bold text-white">{res.position}</td>
-                            <td className="p-2 text-white font-bold">{res.driver_id}</td>
-                            <td className="p-2 text-right text-slate-400">{res.points}</td>
-                            <td className="p-2 text-right">
-                              <span className="text-[8px] uppercase text-slate-500">{res.status}</span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <div className="h-full flex flex-col items-center justify-center p-8 text-center opacity-40">
-                      <Zap size={24} className="text-slate-500 mb-2" />
-                      <p className="text-[10px] font-bold uppercase tracking-widest">No Classification Data</p>
-                      <p className="text-[8px] uppercase mt-1">Predictions available via AI Strategist</p>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center p-4">
+                    <div className="grid grid-cols-4 gap-2 mb-4 w-full px-4">
+                      {[['D', timeLeft.days], ['H', timeLeft.hours], ['M', timeLeft.mins], ['S', timeLeft.secs]].map(([label, val]) => (
+                        <div key={label} className="text-center">
+                          <div className="bg-[#0d0d12] rounded border border-white/5 py-2 text-xl font-black text-white">
+                            {val.toString().padStart(2, '0')}
+                          </div>
+                          <div className="text-[6px] font-bold text-slate-600 uppercase mt-1">{label}</div>
+                        </div>
+                      ))}
                     </div>
-                  )}
+                    <div className="flex items-center gap-1.5 mb-2">
+                       <div className="w-1.5 h-1.5 bg-f1-red rounded-full animate-pulse"></div>
+                       <h3 className="text-[8px] font-black text-white tracking-[0.2em] uppercase">RACE COUNTDOWN</h3>
+                    </div>
+                    <p className="text-[7px] text-slate-500 uppercase font-bold tracking-widest text-center">Results Pending • Session starts in {timeLeft.days}d</p>
+                  </div>
+                )}
                 </div>
               </div>
 
@@ -350,7 +394,7 @@ function App() {
             </div>
           </div>
 
-          <div className="lg:col-span-4 flex flex-col gap-4">
+          <div className="lg:col-span-4 flex flex-col gap-4 min-h-0">
              <div className="flex-1 bg-[#15151e] rounded-lg border border-white/5 overflow-hidden flex flex-col shadow-2xl">
                 <ChatSection />
              </div>

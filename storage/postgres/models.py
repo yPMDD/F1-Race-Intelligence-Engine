@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, BigInteger, Text
 from sqlalchemy.orm import declarative_base, relationship
+from datetime import datetime
 
 Base = declarative_base()
 
@@ -51,3 +52,14 @@ class ResultModel(Base):
     status = Column(String) # e.g. "Finished", "DNF", "+1 Lap"
 
     race = relationship("RaceModel", back_populates="results")
+
+class RacePrediction(Base):
+    __tablename__ = 'predictions'
+    
+    id = Column(Integer, primary_key=True)
+    race_id = Column(Integer, ForeignKey('races.id'), unique=True)
+    prediction_text = Column(Text)
+    model_version = Column(String(50))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    race = relationship("RaceModel")
