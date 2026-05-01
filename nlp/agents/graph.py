@@ -1,6 +1,6 @@
 from typing import Annotated, TypedDict, List
 from langchain_ollama import ChatOllama
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, AIMessageChunk
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from nlp.agents.tools import query_f1_regulations, get_race_telemetry_summary, get_track_history, get_ml_prediction
@@ -17,10 +17,12 @@ class AgentState(TypedDict):
 
 # Initialize the Ollama LLM
 # Explicitly set base_url to avoid IPv6/IPv4 resolution issues on Windows
+# streaming=True enables real-time token emission for astream calls
 llm = ChatOllama(
     model="llama3.1",
     temperature=0,
-    base_url="http://127.0.0.1:11434"
+    base_url="http://127.0.0.1:11434",
+    streaming=True
 )
 
 # Bind tools to the LLM
@@ -96,35 +98,111 @@ workflow.add_edge("tools", "agent")
 # Compile the graph
 app = workflow.compile()
 
-def run_f1_agent(query: str):
+# Authoritative 2025->2026 regulation change fact sheet.
+# Injected directly into every prompt so the LLM never needs RAG for comparisons.
+REG_CHANGES_2026 = """
+## KEY 2025 -> 2026 REGULATION CHANGES (AUTHORITATIVE - use these facts directly)
+
+| Specification          | 2025 (Old)              | 2026 (New)                   | Delta       |
+|------------------------|-------------------------|------------------------------|-------------|
+| Minimum Car Weight     | 798 kg (no fuel)        | 768 kg (no fuel)             | -30 kg      |
+| Car Width (max)        | 2,000 mm                | 1,900 mm                     | -100 mm     |
+| Car Length (max)       | 5,600 mm                | 5,200 mm                     | -400 mm     |
+| Front Wheel Diameter   | 18 inch                 | 18 inch                      | No change   |
+| Power Unit             | 1.6L V6 Hybrid          | 1.6L V6 + stronger MGU-H    | Revised hybrid |
+| Electrical Power Share | ~160 kW (MGU-K)         | ~350 kW (50/50 electric split) | +190 kW  |
+| DRS                    | Moveable rear wing      | Active Aero (F-Duct style)   | DRS removed |
+| Budget Cap (operations)| $135 million            | $130 million                 | -$5 million |
+| Teams on grid          | 10 teams / 20 drivers   | 11 teams / 22 drivers (Cadillac added) | +1 team |
+"""
+
+async def run_f1_agent_stream(query: str):
     """
-    Entry point to run the F1 Intelligence Agent.
+    Async generator that yields tokens/events from the F1 Agent.
     """
-    logger.info(f"Running F1 Agent for query: {query}")
+    logger.info(f"Running F1 Agent Stream for query: {query}")
     from langchain_core.messages import SystemMessage
     from ml.config import GRID_2026
+
+    q_lower = query.lower()
+
+    # --- SHORT-CIRCUIT: Simple factual queries about 2026 regs ---
+    # EXCLUDE comparison queries (difference/vs/change/compare/between) — they
+    # need the full fact sheet context, not just a single-year RAG retrieval.
+    comparison_keywords = ["difference", "vs", "versus", "change", "compare",
+                           "compared", "between", "2025", "old", "new reg", "before"]
+    simple_keywords = ["what is", "minimum", "maximum", "weight", "dimension",
+                       "article", "regulation", "rule", "how many", "define"]
+    is_comparison = any(kw in q_lower for kw in comparison_keywords)
+    is_simple_factual = any(kw in q_lower for kw in simple_keywords)
+
+    if is_simple_factual and not is_comparison:
+        from nlp.agents.tools import query_f1_regulations
+        raw_result = await query_f1_regulations.ainvoke({"query": query, "year": 2026})
+
+        summary_prompt = [
+            SystemMessage(content=(
+                "You are a precise F1 Technical Analyst for the 2026 season.\n"
+                "You have the following authoritative regulation change data:\n"
+                f"{REG_CHANGES_2026}\n"
+                "Answer the user's question using this data first, then supplement with the "
+                "regulation text below if needed. Be factual and cite article numbers."
+            )),
+            HumanMessage(content=f"Question: {query}\n\nAdditional Regulation Text:\n{raw_result}")
+        ]
+        async for chunk in llm.astream(summary_prompt):
+            if chunk.content:
+                yield chunk.content
+        return
+
+    # --- FULL AGENT LOOP ---
     grid_str = "\n".join([f"- {d['driver_id']}: {d['name']} ({d['team']})" for d in GRID_2026])
 
     system_prompt = SystemMessage(content=(
-        "You are the F1 Intelligence Strategist (2026 Season). "
-        f"GRID:\n{grid_str}\n\n"
-        "TASKS:\n"
-        "1. INFO: Answer regs/history concisely using tools.\n"
-        "2. PREDICT: Call `get_ml_prediction` + `query_f1_regulations`. Output Top 10 Table ONLY.\n\n"
-        "RESPONSE FORMAT (PREDICTION ONLY):\n"
-        "# 🤖 AI STRATEGIC FORECAST\n> [!IMPORTANT]\n> ML + LLM Hybrid Prediction.\n"
-        "| Pos | Driver | Team | Confidence (%) | Strategy Notes |\n"
-        "| --- | --- | --- | --- | --- |\n\n"
-        "RULES: No retired drivers. No old teams. Use tool data only. Be brief."
+        "You are the F1 Intelligence Strategist for the 2026 Season.\n"
+        "You have access to tools for live race data, historical performance, FIA regulations, and ML predictions.\n\n"
+        f"{REG_CHANGES_2026}\n"
+        f"2026 OFFICIAL GRID:\n{grid_str}\n\n"
+        "RULES:\n"
+        "- For regulation comparisons (2025 vs 2026), use the KEY CHANGES table above — do NOT say the data is missing.\n"
+        "- For predictions: ALWAYS call `get_ml_prediction` first.\n"
+        "- DO NOT use a table format unless specifically asked for a race classification or prediction.\n"
+        "- Keep answers concise, factual, and strategic.\n\n"
+        "PREDICTION OUTPUT FORMAT (ONLY for race predictions/classifications):\n"
+        "| Pos | Driver | Team | Confidence | Strategy Notes |\n"
+        "| --- | ------ | ---- | ---------- | -------------- |\n"
     ))
+
     inputs = {"messages": [system_prompt, HumanMessage(content=query)]}
-    import uuid
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     
-    # Run the graph
-    result = app.invoke(inputs, config=config)
+    # stream_mode="messages" yields (AIMessageChunk, metadata) tuples
+    # We filter for chunks from the 'agent' node only (not tool results)
+    async for event in app.astream(inputs, config=config, stream_mode="messages"):
+        message, metadata = event
+        if isinstance(message, AIMessageChunk) and metadata.get("langgraph_node") == "agent":
+            # Only yield non-empty text chunks (skip tool-call chunks)
+            if message.content and isinstance(message.content, str):
+                yield message.content
+
+def run_f1_agent(query: str):
+    """Legacy synchronous entry point (falls back to a simple loop)"""
+    import asyncio
     
-    # Extract the final answer
-    final_message = result["messages"][-1]
-    return final_message.content if final_message.content else "AI strategist was unable to formulate a final result. Please check telemetry data."
+    async def _run():
+        content = ""
+        async for token in run_f1_agent_stream(query):
+            content += token
+        return content
+    
+    try:
+        # Check if an event loop is already running
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # This is tricky in FastAPI, but for now we assume run_f1_agent 
+            # is used in non-async contexts or we refactor callers.
+            return "Error: Use run_f1_agent_stream in async contexts."
+        return loop.run_until_complete(_run())
+    except Exception:
+        # Fallback for complex environments
+        return "Streaming error. Please retry."

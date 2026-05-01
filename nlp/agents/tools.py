@@ -13,25 +13,67 @@ logger = logging.getLogger(__name__)
 CHROMA_DIR = "data/chroma"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+# Shared embeddings instance (avoid reloading on every call)
+_embeddings = None
+_vectorstore = None
+
+def _get_vectorstore():
+    global _embeddings, _vectorstore
+    if _vectorstore is None:
+        _embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+        _vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=_embeddings)
+    return _vectorstore, _embeddings
+
+def _hybrid_search(query: str, year: int = 2026, k: int = 6) -> list:
+    """
+    Hybrid search: combines semantic similarity + BM25-style keyword scoring.
+    Returns a deduplicated, re-ranked list of document chunks.
+    """
+    vectorstore, embeddings = _get_vectorstore()
+
+    # 1. Semantic search — retrieve top candidates
+    sem_filter = {"year": year} if year else None
+    sem_docs = vectorstore.similarity_search(query, k=k * 2, filter=sem_filter)
+
+    # 2. BM25-style keyword boosting: boost docs that contain exact query keywords
+    keywords = set(query.lower().split())
+    stop_words = {"the", "a", "is", "what", "how", "of", "in", "for", "and", "to"}
+    keywords -= stop_words
+
+    scored_docs = []
+    seen_content = set()
+    for doc in sem_docs:
+        content_lower = doc.page_content.lower()
+        # Count keyword hits for BM25 boost
+        keyword_hits = sum(1 for kw in keywords if kw in content_lower)
+        score = keyword_hits * 2  # BM25 boost weight
+        
+        # Deduplicate by content hash
+        content_hash = hash(doc.page_content[:100])
+        if content_hash not in seen_content:
+            seen_content.add(content_hash)
+            scored_docs.append((score, doc))
+
+    # 3. Sort: keyword-boosted docs first, then pure semantic
+    scored_docs.sort(key=lambda x: x[0], reverse=True)
+    return [doc for _, doc in scored_docs[:k]]
+
 @tool
-def query_f1_regulations(query: str, year: int = None) -> str:
+def query_f1_regulations(query: str, year: int = 2026) -> str:
     """
     Search the FIA Formula 1 Technical and Sporting Regulations for specific rules.
     Use this to clarify technical specifications, weight limits, or sporting procedures.
-    If a specific year (e.g., 2024, 2025, 2026) is provided, it will prioritize that year.
+    Always defaults to the 2026 regulation year for accuracy.
     """
-    logger.info(f"Agent tool: querying regulations for '{query}' (Year: {year})")
+    logger.info(f"Agent tool: hybrid regulation search for '{query}' (Year: {year})")
     try:
-        embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-        vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-        
-        kwargs = {"k": 5}
-        if year:
-            kwargs["filter"] = {"year": year}
-            
-        docs = vectorstore.similarity_search(query, **kwargs)
-        
-        context = "\n\n".join([f"Source: {d.metadata.get('source')}\nContent: {d.page_content}" for d in docs])
+        docs = _hybrid_search(query, year=year, k=5)
+        if not docs:
+            return f"No regulation data found for '{query}' in {year}. The documents may not have been ingested."
+        context = "\n\n---\n\n".join([
+            f"[Source: {d.metadata.get('source', 'Unknown')} | Page: {d.metadata.get('page', '?')}]\n{d.page_content}"
+            for d in docs
+        ])
         return context
     except Exception as e:
         return f"Error querying regulations: {str(e)}"
