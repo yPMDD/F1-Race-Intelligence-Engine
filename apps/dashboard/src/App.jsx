@@ -3,7 +3,7 @@ import { Flag, Activity, Clock, Zap, Database, Cpu, MessageSquare, Sparkles, Fil
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import ChatSection from './components/ChatSection';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 function App() {
   const [years, setYears] = useState([]);
