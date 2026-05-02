@@ -15,7 +15,7 @@ A production-grade, real-time AI strategist and predictive engine for Formula 1.
 
 ## 🏗️ Architecture & Workflow
 
-![F1 Architecture Workflow](f1_infographic.png)
+![F1 Architecture Workflow](Gemini_Generated_Image_f5p7w0f5p7w0f5p7.png)
 
 The project is divided into three core operational phases:
 
