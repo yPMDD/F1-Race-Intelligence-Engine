@@ -1,5 +1,5 @@
 from typing import Annotated, TypedDict, List
-from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, AIMessageChunk
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -15,13 +15,17 @@ logger = logging.getLogger(__name__)
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], lambda x, y: x + y]
 
-# Initialize the Ollama LLM
-# Explicitly set base_url to avoid IPv6/IPv4 resolution issues on Windows
+# Initialize the Groq LLM
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+# We use Groq's high-speed LPU inference for Llama 3.1 8B
 # streaming=True enables real-time token emission for astream calls
-llm = ChatOllama(
-    model="llama3.1",
+llm = ChatGroq(
+    model="llama-3.1-8b-instant",
     temperature=0,
-    base_url="http://127.0.0.1:11434",
+    api_key=os.getenv("GROQ_API_KEY"),
     streaming=True
 )
 

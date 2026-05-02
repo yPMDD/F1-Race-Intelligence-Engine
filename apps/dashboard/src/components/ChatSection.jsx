@@ -147,7 +147,7 @@ const ChatSection = () => {
           <div className="flex items-center gap-1.5">
             <div className={`w-1.5 h-1.5 rounded-full ${statusConfig.color} ${statusConfig.pulse ? 'animate-pulse' : ''}`} />
             <span className={`text-[10px] font-bold uppercase tracking-tighter ${statusConfig.text}`}>
-              {apiStatus === 'offline' ? 'OLLAMA OFFLINE' : `Llama3 · ${statusConfig.label}`}
+              {apiStatus === 'offline' ? 'GROQ API OFFLINE' : `Groq Llama 3.1 · ${statusConfig.label}`}
             </span>
           </div>
         </div>
@@ -157,7 +157,7 @@ const ChatSection = () => {
       {apiStatus === 'offline' && (
         <div className="px-4 py-2 bg-red-950/40 border-b border-red-500/20 flex items-center gap-2 text-red-400 text-[10px] font-mono">
           <WifiOff size={11} />
-          <span>Backend / Ollama unreachable. Run <code className="bg-black/40 px-1 rounded">.\start.ps1</code> to restart all services.</span>
+          <span>Backend / Groq API unreachable. Run <code className="bg-black/40 px-1 rounded">.\start.ps1</code> to restart all services.</span>
         </div>
       )}
 

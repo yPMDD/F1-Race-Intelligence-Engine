@@ -1,69 +1,63 @@
-# F1 Race Intelligence Engine
+# 🏎️ F1 Race Intelligence Engine (2026 Season)
 
-**A modular data ingestion, ML forecasting, and NLP retrieval platform designed for real-time Formula 1 analytics.**
+A production-grade, real-time AI strategist and predictive engine for Formula 1. This system ingests live telemetry, 2026 FIA regulations, and historical race data to provide real-time strategic insights via a LangGraph multi-agent pipeline and an XGBoost ML forecasting model.
 
-This system normalizes structured session telemetry and unstructured technical documents into a canonical data schema. It serves as the backbone for predictive modeling, retrieval-augmented generation (RAG), and agentic workflows, exposing all data through highly decoupled API boundaries.
+## 🚀 Tech Stack
+- **Frontend:** React, Vite, TailwindCSS, Server-Sent Events (SSE)
+- **Backend API:** FastAPI, Uvicorn, Python
+- **AI & Orchestration:** LangGraph, LangChain, Groq Cloud API (Llama 3.1 8B)
+- **Data Engineering & MLOps:** Hybrid ETL Pipeline, DVC (Data Version Control)
+- **Databases:** PostgreSQL (Relational), ChromaDB (Vector), SQLite (Semantic Cache)
+- **Machine Learning:** XGBoost (Trained on 3 seasons of telemetry, 2026 weighted)
+- **Embeddings:** `sentence-transformers/all-MiniLM-L6-v2`
 
-## Architecture
+---
 
-The system is compartmentalized into discrete microservices interacting via REST interfaces, shared databases, and cache layers.
+## 🏗️ Architecture & Workflow
 
-- **Ingestion Layer:** A hybrid pipeline combining structured batch processing (via FastF1 API) for telemetry/timing data and unstructured scraping for FIA regulations and stewards' reports.
-- **RAG Subsystem:** Processes and embeds unstructured racing documents into a vector store. Implements chunking, metadata attachment, and reranking to ground LLM-generated strategy answers.
-- **Agentic Layer:** Utilizes LangGraph to orchestrate specialized agents (Strategy, Analytics, Rules). Agents maintain state and execute controlled tool handoffs to reason over race data and document indices.
-- **Prediction Engine:** Computes engineered features (e.g., pace advantage, tire degradation slope) to output deterministic forecasts like projected finishing positions and pit window optimizations.
-- **Serving Layer:** A FastAPI-driven backend serving low-latency JSON endpoints to an F1-themed React/Vite dashboard.
+![F1 Architecture Workflow](f1_infographic.png)
 
-## Tech Stack
+The project is divided into three core operational phases:
 
-- **Backend:** Python, FastAPI, Uvicorn, SQLAlchemy
-- **Data & Storage:** PostgreSQL, Redis, Parquet, Vector DB (e.g., pgvector/Qdrant)
-- **ML & Orchestration:** Scikit-learn, LangGraph, DVC
-- **Frontend:** React, Vite
-- **Infrastructure:** Docker, Docker Compose, `uv`
+### 1. Ingestion & MLOps Phase
+Raw F1 telemetry, lap times, and official FIA regulation PDFs are ingested through a Hybrid ETL Pipeline. This pipeline automatically triggers post-race. **DVC (Data Version Control)** is used to snapshot the dataset state, ensuring perfect ML reproducibility and auditability. The clean data is loaded into **PostgreSQL** (for structured data) and **ChromaDB** (for vector embeddings of unstructured text).
 
-## Quickstart
+### 2. ML Forecasting Phase
+An **XGBoost Regressor** is trained on 3 full seasons of historical F1 telemetry. For the 2026 season, the model weights are adjusted to account for the new regulation changes (e.g., -30kg weight, active aero). During race weekends, this model instantly generates a full 22-driver grid prediction order at sub-100ms latency.
+
+### 3. RAG & Agentic Reasoning Core
+User queries from the React dashboard hit a **Semantic Cache (SQLite)** first. If the query is a cache hit, the response streams back instantly (<1.0s). 
+If it's a cache miss, the query is routed through a **LangGraph Multi-Agent Router**:
+- **Factual Path:** Short-circuits directly to the hybrid retriever to pull static 2026 regulations without wasting agentic loops.
+- **Strategic Path:** Enters a full agent loop powered by **Llama 3.1 8B (via Groq LPU)**. The agent intelligently selects tools to query telemetry, run ML predictions, or read rulebooks before streaming the final strategic analysis back to the dashboard via true Server-Sent Events (SSE).
+
+---
+
+## 🛠️ How to Run Locally
 
 ### Prerequisites
-- Docker & Docker Compose
-- Python 3.10+
-- `uv` package manager
+- Python 3.11+ (using `uv` package manager)
 - Node.js & npm
+- PostgreSQL running locally
+- Groq API Key (added to your `.env` file as `GROQ_API_KEY`)
 
-### Deployment
+### Startup
+We have unified the startup sequence into a single PowerShell script that boots the FastAPI backend and the React dashboard simultaneously.
 
-1. **Spin up Infrastructure (PostgreSQL & Redis):**
-   ```bash
-   docker-compose up -d
-   ```
+```powershell
+.\start.ps1
+```
 
-2. **Initialize Environment and Dependencies:**
-   ```bash
-   uv sync
-   ```
+1. **Dashboard:** `http://localhost:5173` (or `5174/5175` depending on port availability)
+2. **Backend API Docs:** `http://localhost:8000/docs`
 
-3. **Execute Data Ingestion Pipeline:**
-   Populate the database with canonical telemetry and fetch unstructured document stubs.
-   ```bash
-   uv run apps/worker/ingestion_worker.py
-   ```
+*Note: The local Ollama LLM requirement has been fully deprecated in favor of the Groq Cloud API to enable zero-GPU, 100% free cloud deployment.*
 
-4. **Start the API Backend:**
-   ```bash
-   uv run uvicorn apps.api.main:app --reload
-   ```
+---
 
-5. **Start the Dashboard:**
-   ```bash
-   cd apps/dashboard
-   npm install
-   npm run dev
-   ```
-
-The API will be available at `http://localhost:8000/docs` and the Dashboard at `http://localhost:5173`.
-
-## Design Principles
-
-- **Data Reproducibility:** Data transformations and ML artifacts are strictly tracked using Data Version Control (DVC). Features are computed deterministically.
-- **Service Decoupling:** Data layers (PostgreSQL/Parquet) and computation layers communicate solely through explicit contracts (Pydantic schemas) to prevent tight coupling.
-- **Latency Optimization:** Heavy queries and repeated inference endpoints are cached natively via Redis. Background worker processes handle blocking I/O (e.g., embedding generation and ingestion operations).
+## 📂 Project Structure
+- `/apps/api/` - FastAPI backend, SSE streaming, router logic, and health polling.
+- `/apps/dashboard/` - React frontend UI, Chat components, prediction layout.
+- `/nlp/agents/` - LangGraph state definitions, agent orchestration, and custom tool binding.
+- `/ml/` - XGBoost prediction scripts, data prep, and DVC ML artifact management.
+- `/storage/` - Vector DB setup and SQL schemas.

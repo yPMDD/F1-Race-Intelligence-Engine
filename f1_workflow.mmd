@@ -1,0 +1,81 @@
+%%{init: {'theme':'dark'}}%%
+graph TD
+    %% Styling Configuration
+    classDef user fill:#3b82f6,stroke:#1e3a8a,stroke-width:2px,color:#fff,font-weight:bold
+    classDef ui fill:#0ea5e9,stroke:#0284c7,stroke-width:2px,color:#fff
+    classDef api fill:#10b981,stroke:#047857,stroke-width:2px,color:#fff
+    classDef cache fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:#fff
+    classDef agent fill:#8b5cf6,stroke:#5b21b6,stroke-width:2px,color:#fff
+    classDef tool fill:#ec4899,stroke:#be185d,stroke-width:2px,color:#fff
+    classDef data fill:#64748b,stroke:#334155,stroke-width:2px,color:#fff
+    classDef ml fill:#ef4444,stroke:#b91c1c,stroke-width:2px,color:#fff
+
+    User((User)):::user --> |"Strategic Query / Prediction"| Dashboard
+    
+    subgraph Frontend ["Frontend Layer"]
+        Dashboard["🏎️ React / Vite Dashboard<br/>(Live Countdowns, SSE Chat UI)"]:::ui
+    end
+
+    Dashboard -->|POST /chat| API
+
+    subgraph API_Layer ["Backend API Layer"]
+        API["⚡ FastAPI Server (StreamingResponse)"]:::api
+        Cache["🧠 SQLite Semantic Cache<br/>(sentence-transformers vector match)"]:::cache
+        
+        API -->|1. Vector Search| Cache
+        Cache -.->|Hit: Stream w/ Humanized Delay| API
+    end
+
+    Cache -->|Miss: Forward Query| Router
+
+    subgraph Orchestration ["LangGraph Multi-Agent Orchestration"]
+        Router{"🚦 Agent Query Router"}:::agent
+        
+        %% Short-circuit path
+        Router -->|"Factual 2026 Regs"| ShortCircuit["⚡ Short-Circuit Path"]:::agent
+        ShortCircuit --> ToolReg1["📚 Tool: query_f1_regulations"]:::tool
+        ToolReg1 --> LLMSummary["🤖 LLM: Concise Summary"]:::agent
+        
+        %% Full agent path
+        Router -->|"Complex Strategy / Predictions"| AgentLoop["🔄 Full Agentic Loop<br/>(System Prompt + Injected Fact Sheet)"]:::agent
+        
+        AgentLoop --> ToolML["📈 Tool: get_ml_prediction"]:::tool
+        AgentLoop --> ToolReg2["📚 Tool: query_f1_regulations"]:::tool
+        AgentLoop --> ToolTelemetry["⏱️ Tool: get_race_telemetry"]:::tool
+        AgentLoop --> ToolHistory["📜 Tool: get_track_history"]:::tool
+        
+        ToolML -.->|"Score/Ranking"| AgentLoop
+        ToolReg2 -.->|"Reg Context"| AgentLoop
+        ToolTelemetry -.->|"Lap Times"| AgentLoop
+        ToolHistory -.->|"Past Winners"| AgentLoop
+        
+        AgentLoop --> Ollama["🧠 Local Llama 3.1<br/>(Ollama CUDA Acceleration)"]:::agent
+    end
+
+    Ollama -->|"True Token Streaming"| API
+    LLMSummary -->|"Stream Tokens"| API
+
+    subgraph MLOps ["Data Engineering & MLOps Pipeline"]
+        RawData[("Raw Data<br/>(Telemetry, Results, FIA PDFs)")]:::data
+        ETL["⚙️ Hybrid ETL Pipeline<br/>(Triggered Post-Race)"]:::data
+        DVC["📦 DVC (Data Version Control)<br/>(Snapshot & Lineage)"]:::data
+        
+        RawData --> ETL
+        ETL --> |"Versioned Snapshots"| DVC
+        
+        Postgres[("PostgreSQL<br/>(Race Data, Telemetry)")]:::data
+        Chroma[("ChromaDB<br/>(Regs Vector Store)")]:::data
+        
+        ETL --> Postgres
+        ETL --> Chroma
+        
+        XGBoost["🧠 XGBoost Regressor<br/>(Trained on 3 Seasons, 2026 Weighted)"]:::ml
+        Postgres -.->|"Training Data"| XGBoost
+    end
+
+    %% Connect Tools to Data
+    ToolReg1 ==>|"Hybrid Search<br/>(BM25 + Semantic)"| Chroma
+    ToolReg2 ==>|"Hybrid Search<br/>(BM25 + Semantic)"| Chroma
+    ToolML ==>|"Feature Extraction"| XGBoost
+    ToolTelemetry ==>|"SQL Queries"| Postgres
+    ToolHistory ==>|"SQL Queries"| Postgres
