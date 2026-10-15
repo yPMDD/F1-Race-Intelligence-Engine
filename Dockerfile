@@ -5,13 +5,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
-    HF_HOME=/app/.cache/huggingface
-
-# torch ships CUDA wheels by default on Linux, which pulled ~3 GB of nvidia-*
-# packages into a container that only ever runs on CPU (the embedding model is
-# all-MiniLM-L6-v2 on CPU). This forces the CPU-only wheel index and cut the
-# image from 3.59 GB to well under 1 GB.
-ENV UV_TORCH_BACKEND=cpu
+    HF_HOME=/app/.cache/huggingface \
+    UV_NO_CACHE=1 \
+    UV_LINK_MODE=copy
 
 WORKDIR /app
 
@@ -24,14 +20,20 @@ RUN pip install --no-cache-dir uv
 
 # Dependencies first so the layer caches across code edits.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-dev --no-install-project
+COPY scripts/docker_install_deps.sh /usr/local/bin/docker_install_deps.sh
+RUN chmod +x /usr/local/bin/docker_install_deps.sh
+
+# CPU-only torch: 3.59 GB -> 766 MB. The script documents why each naive
+# alternative (UV_TORCH_BACKEND, --no-install-package, [tool.uv.sources])
+# silently fails.
+RUN docker_install_deps.sh --no-dev --no-install-project
 
 COPY . /app
 
-# NOTE: `uv sync` alone is not enough -- the app imports the training artifact
+# `uv sync` alone is not enough -- the app imports the training artifact
 # (storage/models/f1_predictor.joblib) and the vector store (data/chroma), and
 # neither is a Python package.
-RUN uv sync --no-dev
+RUN docker_install_deps.sh --no-dev
 
 # data/chroma/ is gitignored (it is a ~90 MB regenerable HNSW index), so a
 # fresh `git clone` -- e.g. the Hugging Face Spaces build -- arrives without a
@@ -40,7 +42,7 @@ RUN uv sync --no-dev
 ARG BUILD_VECTORSTORE=true
 RUN if [ "$BUILD_VECTORSTORE" = "true" ] && [ ! -f data/chroma/chroma.sqlite3 ]; then \
         echo ">> data/chroma missing - ingesting data/raw into ChromaDB..." \
-        && uv run python pipelines/etl/document_processor.py \
+        && /app/.venv/bin/python pipelines/etl/document_processor.py \
     else \
         echo ">> data/chroma present - skipping ingestion." ; \
     fi

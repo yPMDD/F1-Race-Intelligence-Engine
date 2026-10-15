@@ -86,6 +86,35 @@ Vercel defaults to the repo root and will fail to find `vite`).
 
 Vercel deploys automatically on every push to `main`. No workflow needed.
 
+### 5. About the Docker image size
+
+The image is **1.21 GB**, down from **3.59 GB**. `scripts/docker_install_deps.sh`
+handles this, and the reasoning matters if you ever touch it:
+
+| Approach | Result | Why |
+| --- | --- | --- |
+| `uv sync` as-is | 3.59 GB | torch's PyPI wheel is a CUDA build on Linux |
+| `UV_TORCH_BACKEND=cpu` | 3.59 GB | ignored for a locked install; `uv.lock` pins torch to PyPI |
+| `--no-install-package torch` | 3.25 GB | **removes** torch from the venv (verified) and still installs the `nvidia-*` wheels, which are separate lock entries |
+| `[tool.uv.sources]` in `pyproject.toml` | no effect | a clean `uv lock` still resolves torch from `registry.pypi.org` |
+| prune `nvidia-*` + reinstall CPU torch | **1.21 GB** | what the script does |
+
+`UV_NO_CACHE=1` in the Dockerfile is also required: uv keeps every downloaded
+wheel in `/root/.cache/uv`, so pruning alone still leaves ~2 GB of CUDA wheels
+inside the image layer.
+
+Two traps worth knowing:
+
+- **Do not use `uv run` inside the container.** It re-syncs from `uv.lock` on
+  every invocation, which silently reinstalls the CUDA torch and all 16
+  `nvidia-*` packages on each cold start, undoing all of the above. The
+  entrypoint calls `/app/.venv/bin/python` directly.
+- An earlier revision of this build reported 766 MB — that image was *broken*:
+  the `--no-install-package` approach had removed torch entirely, and only
+  appeared to work because `uv run` reinstalled it at runtime. The build now
+  asserts `torch.__version__` ends in `+cpu` and that no `nvidia*` directory
+  exists, so that failure mode cannot ship again.
+
 ---
 
 ## Everyday flow

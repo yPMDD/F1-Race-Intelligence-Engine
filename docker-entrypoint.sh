@@ -10,6 +10,14 @@ set -euo pipefail
 
 echo "==> F1 Race Intelligence Engine backend"
 
+# Call the venv interpreter directly.
+#
+# `uv run` re-syncs the environment from uv.lock on every invocation, and
+# uv.lock pins torch to registry.pypi.org -- so it would silently reinstall the
+# CUDA build plus ~3 GB of nvidia-* wheels on every cold start, undoing the
+# CPU-only install the image was built with.
+VENV_PY="/app/.venv/bin/python"
+
 # --- required configuration -------------------------------------------------
 missing=()
 [ -z "${GROQ_API_KEY:-}" ] && missing+=("GROQ_API_KEY")
@@ -30,7 +38,7 @@ mkdir -p "$HF_HOME" /app/data/cache
 # Neon may still be resuming the compute, or a cold start may briefly fail DNS.
 echo "==> waiting for database"
 for i in $(seq 1 30); do
-  if uv run python -c "
+  if "$VENV_PY" -c "
 from sqlalchemy import create_engine, text
 import os
 e = create_engine(os.environ['DATABASE_URL'], pool_pre_ping=True)
@@ -49,7 +57,7 @@ done
 
 # --- migrations -------------------------------------------------------------
 echo "==> applying migrations"
-if uv run alembic upgrade head; then
+if "$VENV_PY" -m alembic upgrade head; then
   echo "    schema up to date"
 else
   echo "FATAL: migrations failed. Refusing to start against an unknown schema." >&2
@@ -59,7 +67,7 @@ fi
 # --- serve ------------------------------------------------------------------
 PORT="${PORT:-7860}"
 echo "==> serving on 0.0.0.0:${PORT}"
-exec uv run uvicorn apps.api.main:app \
+exec "$VENV_PY" -m uvicorn apps.api.main:app \
   --host 0.0.0.0 \
   --port "${PORT}" \
   --workers 1 \
