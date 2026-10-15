@@ -2,10 +2,10 @@ import joblib
 import json
 import re
 import difflib
-import pandas as pd
-from sqlalchemy import create_engine
-import os
 import logging
+import pandas as pd
+from sqlalchemy import create_engine, text
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -200,7 +200,7 @@ class F1Predictor:
     def _fetch_driver_stats(self) -> dict:
         """Per-driver recent form, cached across requests."""
         if F1Predictor._stats_cache is None:
-            query = """
+            query = text("""
             WITH ranked AS (
                 SELECT
                     res.driver_id,
@@ -221,9 +221,16 @@ class F1Predictor:
                 SUM(points) FILTER (WHERE year = 2026) AS season_points
             FROM ranked
             GROUP BY driver_id
-            """
-            stats_df = pd.read_sql(query, self.engine)
-            F1Predictor._stats_cache = stats_df.set_index("driver_id").to_dict("index")
+            """)
+            with self.engine.connect() as conn:
+                rows = conn.execute(query).mappings().all()
+            F1Predictor._stats_cache = {
+                r["driver_id"]: {
+                    "momentum": r["momentum"],
+                    "season_points": r["season_points"],
+                }
+                for r in rows
+            }
         return F1Predictor._stats_cache
 
     def _fetch_track_history(self, canonical_track: str) -> dict:
@@ -231,22 +238,32 @@ class F1Predictor:
 
         Mirrors the training-time `track_history` feature (expanding mean of
         position at that race name), evaluated over whatever history exists now.
+
+        Uses SQLAlchemy `text()` deliberately: pandas' `read_sql` hands the raw
+        string to the DBAPI, where psycopg2 expects pyformat `%(name)s`, so a
+        `:track` parameter silently reached the server as literal SQL and every
+        call raised a syntax error.
         """
-        query = """
+        query = text("""
         SELECT res.driver_id, AVG(res.position) AS avg_position
         FROM results res
         JOIN races r ON res.race_id = r.id
         WHERE r.name = :track
         GROUP BY res.driver_id
-        """
+        """)
         try:
-            df = pd.read_sql(query, self.engine, params={"track": canonical_track})
+            with self.engine.connect() as conn:
+                rows = conn.execute(query, {"track": canonical_track}).mappings().all()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Track-history lookup failed for %r: %s", canonical_track, exc)
+            logger.error(
+                "Track-history lookup failed for %r: %s", canonical_track, exc
+            )
             return {}
-        if df.empty:
-            return {}
-        return {row["driver_id"]: float(row["avg_position"]) for _, row in df.iterrows()}
+        return {
+            r["driver_id"]: float(r["avg_position"])
+            for r in rows
+            if r["avg_position"] is not None
+        }
 
     # -- feature assembly -------------------------------------------------
     def _build_features(self, canonical_track: str, stats_dict: dict, track_idx: int) -> pd.DataFrame:
