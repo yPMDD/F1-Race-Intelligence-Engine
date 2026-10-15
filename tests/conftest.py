@@ -7,6 +7,8 @@ imported. `storage.postgres.database` reads the env var at import time and
 real Postgres URL in .env. That keeps the unit suite hermetic and runnable with
 no external services.
 """
+from __future__ import annotations
+
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./tests/.pytest_tmp.db")
@@ -24,6 +26,108 @@ from storage.postgres.models import (
     ResultModel,
     RacePrediction,
 )
+
+
+class FakeEmbeddings:
+    """Deterministic, cheap stand-in for HuggingFaceEmbeddings.
+
+    Embeds text into a bag-of-byte-counts vector so strings sharing many
+    characters land close together -- enough structure to exercise cosine
+    thresholds without downloading a transformer.
+    """
+
+    def __init__(self, *a, **kw):
+        self.dim = 64
+
+    def _vec(self, text: str):
+        import numpy as np
+
+        v = np.zeros(self.dim, dtype=np.float32)
+        for ch in text.lower().encode("utf-8", "ignore"):
+            v[ch % self.dim] += 1.0
+        norm = np.linalg.norm(v)
+        return v / norm if norm else v
+
+    def embed_query(self, text: str):
+        return self._vec(text)
+
+    def embed_documents(self, texts):
+        return [self._vec(t) for t in texts]
+
+
+@pytest.fixture(autouse=True)
+def _block_real_network(monkeypatch):
+    """Fail loudly if a test tries to reach the internet.
+
+    Several modules do function-local imports (e.g. the race router does
+    `from nlp.agents.graph import run_f1_agent` inside the handler), so a
+    monkeypatch on the wrong module attribute silently leaves the real Groq
+    client wired up -- which then burns minutes of wall clock and real tokens
+    during the test run. This guard turns that class of mistake into an
+    immediate, obvious failure.
+    """
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def guarded(self, address, *a, **kw):
+        host = address[0] if isinstance(address, tuple) else address
+        if isinstance(host, str) and host not in ("127.0.0.1", "::1", "localhost"):
+            raise RuntimeError(
+                f"Test attempted a real network connection to {host!r}. "
+                "Patch the symbol at its *use* site (modules that import "
+                "inside functions must be patched on the source module)."
+            )
+        return real_connect(self, address, *a, **kw)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_semantic_cache(monkeypatch, tmp_path_factory):
+    """Replace the module-level semantic cache singleton with a cheap fake.
+
+    `nlp/cache/semantic_cache.py` builds `cache_instance = SemanticCache()` at
+    *import* time, which loads all-MiniLM-L6-v2 and writes into the real
+    data/cache directory. The router reaches for that singleton on every result
+    submission, so tests would otherwise pay for a transformer download.
+
+    The stub has to be installed on `langchain_huggingface` -- not on the
+    semantic_cache module -- because that module does
+    `from langchain_huggingface import HuggingFaceEmbeddings` at import time
+    and binds the name immediately.
+    """
+    import langchain_huggingface
+
+    monkeypatch.setattr(
+        langchain_huggingface, "HuggingFaceEmbeddings",
+        lambda *a, **kw: FakeEmbeddings(),
+    )
+
+    import sys
+    sys.modules.pop("nlp.cache.semantic_cache", None)
+    import nlp.cache.semantic_cache as sc_mod
+
+    store: dict = {}
+
+    class _FakeCache:
+        def get(self, query, threshold=0.92):
+            return store.get(query)
+
+        def set(self, query, response):
+            store[query] = response
+
+        def invalidate_all(self):
+            n = len(store)
+            store.clear()
+            return n
+
+        def count(self):
+            return len(store)
+
+    monkeypatch.setattr(sc_mod, "cache_instance", _FakeCache())
+    return sc_mod
 
 
 @pytest.fixture(scope="session")
