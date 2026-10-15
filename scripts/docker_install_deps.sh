@@ -23,8 +23,39 @@ set -euo pipefail
 
 VENV_PY="${VENV_PY:-/app/.venv/bin/python}"
 VENV_DIR="${VENV_DIR:-$(dirname "$(dirname "$VENV_PY")")}"
-TORCH_VERSION="${TORCH_VERSION:-2.11.0}"
 TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}"
+
+# Derive the torch version from uv.lock rather than hardcoding it. A literal
+# default here silently drifts the moment anyone runs `uv lock --upgrade`, and
+# the failure is confusing: uv would install the locked version and then
+# reinstall a different one from the CPU index.
+#
+# uv.lock writes:
+#   [[package]]
+#   name = "torch"
+#   version = "2.14.1"
+#
+# Written in POSIX awk: the image ships mawk, which rejects `?` quantifiers.
+locked_torch_version() {
+  awk '
+    /^\[\[package\]\]/ { in_torch = 0 }
+    /^name = "torch"$/  { in_torch = 1; next }
+    in_torch && /^version = / {
+      gsub(/^version = /, "", $0)
+      gsub(/"/, "", $0)
+      print $0
+      exit
+    }
+  ' uv.lock 2>/dev/null
+}
+
+TORCH_VERSION="${TORCH_VERSION:-$(locked_torch_version)}"
+if [ -z "$TORCH_VERSION" ]; then
+  echo "FATAL: could not determine the locked torch version from uv.lock." >&2
+  echo "       Pass TORCH_VERSION explicitly." >&2
+  exit 1
+fi
+echo "==> locked torch version: ${TORCH_VERSION}"
 
 echo "==> syncing project dependencies"
 uv sync "$@"
