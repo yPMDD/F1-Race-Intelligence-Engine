@@ -1,3 +1,17 @@
+---
+title: F1 Race Intelligence Engine API
+emoji: 🏎️
+colorFrom: red
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+suggested_hardware: cpu-basic
+# Cold start downloads the MiniLM embedding model and may rebuild the Chroma
+# index from data/raw if it is absent. The 30 min default is tight for that.
+startup_duration_timeout: 20m
+---
+
 # 🏎️ F1 Race Intelligence Engine (2026 Season)
 
 A production-grade, real-time AI strategist and predictive engine for Formula 1. This system ingests live telemetry, 2026 FIA regulations, and historical race data to provide real-time strategic insights via a LangGraph multi-agent pipeline and an XGBoost ML forecasting model.
@@ -52,6 +66,7 @@ python -m pip install uv
 uv sync
 copy .env.example .env      # then fill in GROQ_API_KEY
 npm --prefix apps/dashboard install
+uv run alembic upgrade head  # create the schema (not automatic any more)
 
 # every time
 .\start.ps1
@@ -86,13 +101,37 @@ Then set `DATABASE_URL=postgresql://f1user:f1password@localhost:5433/f1db`.
 ## 🧪 Tests
 
 ```powershell
-uv run pytest                        # backend, 90 tests, hermetic (SQLite, no network)
+uv run pytest                        # backend, 111 tests, hermetic (SQLite, no network)
 npm --prefix apps/dashboard test     # frontend SSE parser, 14 tests
 ```
 
 The backend suite redirects `DATABASE_URL` to SQLite and installs a socket
 guard that fails any test attempting a real network call, so it runs offline
 in a few seconds.
+
+---
+
+## 🚢 Deployment
+
+`main` is production; `dev` is where changes land. CI runs on every push and PR,
+and merging to `main` auto-deploys to **Neon** (Postgres), **Hugging Face Spaces**
+(the FastAPI backend) and **Vercel** (the dashboard).
+
+```
+dev ──▶ PR ──▶ CI (tests · docker build · secret scan)
+              └─ merge ──▶ main ──▶ Neon migrations ──▶ HF Space redeploy
+                                                  └─▶ Vercel (own git integration)
+```
+
+Schema changes go through **Alembic** — `create_all()` never alters existing
+tables, so it could not detect them:
+
+```powershell
+uv run alembic revision --autogenerate -m "add compound index"
+uv run alembic upgrade head
+```
+
+**Full setup, secret names and troubleshooting: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).**
 
 ---
 
@@ -104,3 +143,5 @@ in a few seconds.
 - `ml/` - XGBoost training, feature prep, and the runtime predictor.
 - `pipelines/etl/` - PDF ingestion into ChromaDB.
 - `storage/` - SQLAlchemy models and the trained model artifact.
+- `alembic/` - Database migrations.
+- `tests/` - 111 backend tests.

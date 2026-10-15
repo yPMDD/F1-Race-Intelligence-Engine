@@ -4,7 +4,14 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    UV_PROJECT_ENVIRONMENT=/app/.venv
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    HF_HOME=/app/.cache/huggingface
+
+# torch ships CUDA wheels by default on Linux, which pulled ~3 GB of nvidia-*
+# packages into a container that only ever runs on CPU (the embedding model is
+# all-MiniLM-L6-v2 on CPU). This forces the CPU-only wheel index and cut the
+# image from 3.59 GB to well under 1 GB.
+ENV UV_TORCH_BACKEND=cpu
 
 WORKDIR /app
 
@@ -41,8 +48,16 @@ RUN if [ "$BUILD_VECTORSTORE" = "true" ] && [ ! -f data/chroma/chroma.sqlite3 ];
 # Hugging Face Spaces serves on port 7860.
 EXPOSE 7860
 
-# Provide a default so the container boots even before a real key is injected.
-# On Spaces, set GROQ_API_KEY / DATABASE_URL / CORS_ORIGINS as Space secrets.
-ENV GROQ_MODEL=qwen/qwen3.8-27b
+# Provide safe defaults so a minimal Space still boots. Real values come from
+# Space "Variables and secrets" (or container env): GROQ_API_KEY, DATABASE_URL
+# (Neon pooled endpoint) and CORS_ORIGINS.
+ENV GROQ_MODEL=qwen/qwen3.8-27b \
+    GROQ_MAX_TOKENS=800 \
+    PORT=7860
 
-CMD ["uv", "run", "uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "7860"]
+# The entrypoint waits for the database, runs `alembic upgrade head`, then
+# serves. It refuses to start if the schema cannot be brought up to date.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
