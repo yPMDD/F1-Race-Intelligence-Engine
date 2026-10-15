@@ -44,9 +44,31 @@ def process_documents():
             continue
 
         import re
+        import unicodedata
+
+        # PDF text extraction emits typographic ligatures (ﬁ U+FB01, ﬂ U+FB02)
+        # rather than plain ASCII letters. The regulations say "disqualified",
+        # "specified", "deficiency"; the extracted text says "disqualiﬁed".
+        # Anything that searches for the ASCII spelling therefore misses.
+        LIGATURES = {
+            "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl",
+            "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st",
+        }
+
         def clean_text(text):
-            text = re.sub(r'(\d)\s+(\d)(?=kg|mm|cm|km|m/s|kW|V|A)', r'\1\2', text)
-            text = text.replace('− ', '-')
+            # 1. ligatures -> ascii
+            for lig, plain in LIGATURES.items():
+                text = text.replace(lig, plain)
+            # 2. NFKC fold for any other compatibility forms (superscripts,
+            #    full-width punctuation, etc.)
+            text = unicodedata.normalize("NFKC", text)
+            # 3. The FIA PDFs render minus signs as U+2212; normalise so that
+            #    numeric ranges ("3 5 mm") parse consistently.
+            text = text.replace("−", "-")
+            # 4. Re-join magnitudes that PDF extraction split across a space
+            #    ("7 6 8 kg" -> "768 kg") but leave genuine ranges alone by
+            #    requiring a unit suffix.
+            text = re.sub(r'(\d)\s+(\d)(?=kg|mm|cm|km|m/s|kW|V|A\b)', r'\1\2', text)
             return text
 
         for doc in documents:
