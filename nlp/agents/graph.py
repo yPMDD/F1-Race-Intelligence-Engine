@@ -1,4 +1,6 @@
 from typing import Annotated, TypedDict, List
+import os
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, AIMessageChunk
 from langgraph.graph import StateGraph, END
@@ -9,35 +11,77 @@ import json
 import re
 import uuid
 
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 # Define the state for our graph
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], lambda x, y: x + y]
 
-# Initialize the Groq LLM
-import os
-from dotenv import load_dotenv
-load_dotenv()
+# --- Groq LLM ---------------------------------------------------------------
+# NOTE: previously `llama-3.1-8b-instant`. Groq still lists that model but
+# gates it to Enterprise ("Contact Sales") rate limits, so it 402s/429s for
+# anyone on the free Developer plan. qwen/qwen3.8-27b is on the Developer tier
+# (250K TPM / 1K RPM, 450 t/s) and is a far stronger model for the tool-calling
+# work this agent does.
+# Override with GROQ_MODEL if the account is provisioned differently.
+DEFAULT_MODEL = "qwen/qwen3.8-27b"
 
-# We use Groq's high-speed LPU inference for Llama 3.1 8B
-# streaming=True enables real-time token emission for astream calls
-llm = ChatGroq(
-    model="llama-3.1-8b-instant",
-    temperature=0,
-    api_key=os.getenv("GROQ_API_KEY"),
-    streaming=True
-)
+tools = [query_f1_regulations, get_race_telemetry_summary, get_track_history, get_ml_prediction]
 
 # Bind tools to the LLM
-tools = [query_f1_regulations, get_race_telemetry_summary, get_track_history, get_ml_prediction]
-llm_with_tools = llm.bind_tools(tools)
+_llm_with_tools = None
+
+
+def get_model_name() -> str:
+    return os.getenv("GROQ_MODEL", DEFAULT_MODEL)
+
+
+def get_llm():
+    """Build the ChatGroq client on first use.
+
+    Constructed lazily rather than at import time so that importing this module
+    (for tests, or for the `/races` and `/rag` routes, which need neither the
+    LLM nor an API key) does not hard-fail when GROQ_API_KEY is unset.
+    """
+    global _llm_with_tools
+    if _llm_with_tools is None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "GROQ_API_KEY is not set. Add it to your .env file "
+                "(see .env.example) and restart the API."
+            )
+        llm = ChatGroq(
+            model=get_model_name(),
+            temperature=0,
+            api_key=api_key,
+            streaming=True,
+        )
+        _llm_with_tools = llm.bind_tools(tools)
+    return _llm_with_tools
+
+
+def reset_llm_cache():
+    """Drop the memoised client (used by tests and after a key change)."""
+    global _llm_with_tools
+    _llm_with_tools = None
+
+
+# Back-compat aliases: the previous module-level `llm` / `llm_with_tools` names
+# were imported directly by other modules.
+def __getattr__(name):
+    if name in ("llm", "llm_with_tools"):
+        return get_llm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Define the logic for the agent node
 def call_model(state: AgentState):
     logger.info("Agentic Node: calling model")
     messages = state['messages']
-    response = llm_with_tools.invoke(messages)
+    response = get_llm().invoke(messages)
     
     # --- Robust Manual Parsing Fallback ---
     # If the model returned a JSON string in content but no formal tool_calls
@@ -154,7 +198,7 @@ async def run_f1_agent_stream(query: str):
             )),
             HumanMessage(content=f"Question: {query}\n\nAdditional Regulation Text:\n{raw_result}")
         ]
-        async for chunk in llm.astream(summary_prompt):
+        async for chunk in get_llm().astream(summary_prompt):
             if chunk.content:
                 yield chunk.content
         return
@@ -189,24 +233,52 @@ async def run_f1_agent_stream(query: str):
             if message.content and isinstance(message.content, str):
                 yield message.content
 
-def run_f1_agent(query: str):
-    """Legacy synchronous entry point (falls back to a simple loop)"""
+def run_f1_agent(query: str) -> str:
+    """Blocking entry point: drains the stream and returns the full text.
+
+    Used by `apps/api/routers/race.py` (/races/{id}/predict) and
+    `ml/precompute_all.py`, both of which are sync call sites (FastAPI runs
+    sync endpoints in a threadpool, so there is no running loop there).
+
+    The old implementation called `asyncio.get_event_loop()` unguarded. On
+    Python 3.12+ that raises RuntimeError when the calling thread has no
+    current event loop, and the bare `except Exception` below swallowed it --
+    so every prediction silently persisted the literal string
+    "Streaming error. Please retry." into the database. Run in a *fresh*
+    thread when a loop may already be running in this one, and always close it.
+    """
     import asyncio
-    
+    import threading
+
     async def _run():
         content = ""
         async for token in run_f1_agent_stream(query):
             content += token
         return content
-    
-    try:
-        # Check if an event loop is already running
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # This is tricky in FastAPI, but for now we assume run_f1_agent 
-            # is used in non-async contexts or we refactor callers.
-            return "Error: Use run_f1_agent_stream in async contexts."
-        return loop.run_until_complete(_run())
-    except Exception:
-        # Fallback for complex environments
-        return "Streaming error. Please retry."
+
+    result: dict = {}
+
+    def _runner():
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            result["value"] = loop.run_until_complete(_run())
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            result["error"] = exc
+        finally:
+            try:
+                asyncio.set_event_loop(None)
+            finally:
+                loop.close()
+
+    # A dedicated thread guarantees no event loop is bound to it, so this is
+    # safe whether or not the caller is already inside a loop.
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if "error" in result:
+        logger.error("run_f1_agent failed for %r: %s", query, result["error"])
+        raise RuntimeError(f"Agent execution failed: {result['error']}") from result["error"]
+
+    return result.get("value", "")
