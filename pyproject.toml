@@ -8,6 +8,7 @@ readme = "README.md"
 # fails in the container if this is pinned too high.
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "alembic>=1.20.0",
     "chromadb>=1.5.8",
     "fastapi>=0.136.1",
     "fastf1>=3.8.3",

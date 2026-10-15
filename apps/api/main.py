@@ -9,8 +9,8 @@ import logging
 load_dotenv()
 
 from apps.api.routers import race, rag, agent
-from storage.postgres.database import engine
-from storage.postgres.models import Base
+from storage.postgres.database import engine  # noqa: F401
+import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,8 +20,26 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# Create DB tables
-Base.metadata.create_all(bind=engine)
+# NOTE: schema creation deliberately does NOT happen here.
+#
+# This used to call `Base.metadata.create_all(bind=engine)` at import time.
+# create_all() only ever issues CREATE TABLE IF NOT EXISTS -- it never alters an
+# existing table -- so a column added on `dev` would simply be missing in prod,
+# with no error anywhere until a query failed at runtime.
+#
+# Schema is owned by Alembic now:
+#   local  -> alembic upgrade head
+#   CI/CD  -> the 'migrate' job runs it against Neon before the Space deploys.
+#
+# AUTO_CREATE_TABLES=1 exists only for throwaway local scratch databases.
+
+# AUTO_CREATE_TABLES is opt-in and exists only so a scratch database can be
+# spun up without running Alembic. It is intentionally NOT the default.
+if os.getenv("AUTO_CREATE_TABLES") == "1":
+    from storage.postgres.models import Base
+
+    Base.metadata.create_all(bind=engine)
+    logger.warning("AUTO_CREATE_TABLES=1 - schema managed by create_all, not Alembic.")
 
 
 def _allowed_origins():
