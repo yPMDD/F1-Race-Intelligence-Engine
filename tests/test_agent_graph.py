@@ -27,6 +27,28 @@ def test_model_name_env_override(monkeypatch):
     assert graph_mod.get_model_name() == "some/other-model"
 
 
+def test_max_tokens_is_capped_below_the_free_tier_otpm_budget():
+    """Regression: every agent call 429'd until max_tokens was capped.
+
+    Groq's free tier allows 1000 output tokens/minute, while
+    qwen/qwen3.8-27b defaults to a 16384 max completion. Sending the model
+    default makes the provider reject the request outright with
+    "Request too large ... on output tokens per minute (OTPM): Limit 1000".
+    """
+    assert graph_mod.DEFAULT_MAX_TOKENS <= 1000
+    assert graph_mod.get_max_tokens() <= 1000
+
+
+def test_max_tokens_env_override(monkeypatch):
+    monkeypatch.setenv("GROQ_MAX_TOKENS", "4096")
+    assert graph_mod.get_max_tokens() == 4096
+
+
+def test_max_tokens_falls_back_on_bad_value(monkeypatch):
+    monkeypatch.setenv("GROQ_MAX_TOKENS", "not-a-number")
+    assert graph_mod.get_max_tokens() == graph_mod.DEFAULT_MAX_TOKENS
+
+
 def test_get_llm_raises_helpfully_without_api_key(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     graph_mod.reset_llm_cache()

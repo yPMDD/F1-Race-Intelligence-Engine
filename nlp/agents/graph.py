@@ -28,6 +28,20 @@ class AgentState(TypedDict):
 # Override with GROQ_MODEL if the account is provisioned differently.
 DEFAULT_MODEL = "qwen/qwen3.8-27b"
 
+# Output-token ceiling.
+#
+# qwen/qwen3.8-27b advertises a 16,384-token max completion, but Groq also
+# enforces an output-tokens-per-minute budget that the *free* (on_demand)
+# tier sets to 1000. Because ChatGroq leaves max_tokens unset, the model
+# default of 16384 is sent, and the provider rejects the request up front:
+#
+#   Error code: 429 ... on output tokens per minute (OTPM): Limit 1000,
+#   Requested 1095.
+#
+# Every single agent call failed until this was capped below the OTPM budget.
+# Override with GROQ_MAX_TOKENS if you are on a paid tier.
+DEFAULT_MAX_TOKENS = 800
+
 tools = [query_f1_regulations, get_race_telemetry_summary, get_track_history, get_ml_prediction]
 
 # Bind tools to the LLM
@@ -36,6 +50,13 @@ _llm_with_tools = None
 
 def get_model_name() -> str:
     return os.getenv("GROQ_MODEL", DEFAULT_MODEL)
+
+
+def get_max_tokens() -> int:
+    try:
+        return int(os.getenv("GROQ_MAX_TOKENS", DEFAULT_MAX_TOKENS))
+    except ValueError:
+        return DEFAULT_MAX_TOKENS
 
 
 def get_llm():
@@ -58,6 +79,7 @@ def get_llm():
             temperature=0,
             api_key=api_key,
             streaming=True,
+            max_tokens=get_max_tokens(),
         )
         _llm_with_tools = llm.bind_tools(tools)
     return _llm_with_tools
