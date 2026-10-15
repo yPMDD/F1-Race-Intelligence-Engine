@@ -1,7 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Bot, User, Loader2, Sparkles, RefreshCw, WifiOff } from 'lucide-react';
+import { createSseReader, createTokenBuffer } from '../lib/sse';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// Keep in sync with DEFAULT_MODEL in nlp/agents/graph.py.
+const MODEL_LABEL = 'qwen3.8-27b';
 
 const ChatSection = () => {
   const [messages, setMessages] = useState([
@@ -12,6 +16,7 @@ const ChatSection = () => {
   const [apiStatus, setApiStatus] = useState('checking'); // 'online' | 'offline' | 'checking'
   const [lastFailedQuery, setLastFailedQuery] = useState(null);
   const scrollRef = useRef(null);
+  const abortRef = useRef(null);
 
   // Health check - polls every 10 seconds
   const checkHealth = useCallback(async () => {
@@ -29,11 +34,24 @@ const ChatSection = () => {
     return () => clearInterval(interval);
   }, [checkHealth]);
 
+  // Abort any in-flight stream if the component unmounts.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  const appendToLast = (chunk) => {
+    setMessages(prev => {
+      if (prev.length === 0) return prev;
+      const updated = [...prev];
+      const last = updated[updated.length - 1];
+      updated[updated.length - 1] = { ...last, content: last.content + chunk };
+      return updated;
+    });
+  };
 
   const handleSend = async (overrideQuery = null) => {
     const queryText = overrideQuery ?? input;
@@ -49,73 +67,76 @@ const ChatSection = () => {
     setLastFailedQuery(null);
     setIsLoading(true);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let serverError = null;
+    const buf = createTokenBuffer(appendToLast);
+
     try {
-      const response = await fetch(`${API_BASE}/agent/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: queryText }),
-      });
+      let response;
+      try {
+        response = await fetch(`${API_BASE}/agent/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: queryText }),
+          signal: controller.signal,
+        });
+      } catch (e) {
+        // Transport-level failure => the backend really is unreachable.
+        if (e.name !== 'AbortError') setApiStatus('offline');
+        throw e;
+      }
 
       if (!response.ok) throw new Error(`API returned ${response.status}`);
-      if (!response.body) throw new Error('No stream body — server may not support streaming');
+      if (!response.body) throw new Error('The server did not return a stream.');
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = '';
-      let hasContent = false;
+      const sse = createSseReader({
+        onToken: (t) => buf.push(t),
+        onError: (m) => { serverError = m; },
+      });
 
-      while (true) {
+      // `sse.isDone()` terminates the loop on [DONE] instead of merely
+      // breaking the inner frame loop, which previously left the reader
+      // running until the server happened to close the connection.
+      while (!sse.isDone()) {
         const { done, value } = await reader.read();
         if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.replace('data: ', '').trim();
-          if (payload === '[DONE]') break;
-
-          try {
-            const parsed = JSON.parse(payload);
-            if (parsed.token) {
-              hasContent = true;
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  role: 'assistant',
-                  content: updated[updated.length - 1].content + parsed.token
-                };
-                return updated;
-              });
-            }
-            if (parsed.error) {
-              throw new Error(parsed.error);
-            }
-          } catch (parseErr) {
-            if (parseErr.message !== 'Unexpected token') throw parseErr;
-          }
-        }
+        sse.push(decoder.decode(value, { stream: true }));
       }
+      sse.end();
+      buf.flush();
+      try { await reader.cancel(); } catch { /* already closed */ }
 
-      // If stream closed with no tokens — Ollama likely timed out silently
-      if (!hasContent) throw new Error('AI returned empty response. Ollama may be overloaded — please retry.');
-
+      if (serverError) throw new Error(serverError);
+      if (!sse.sawToken()) {
+        throw new Error('The strategist returned an empty response. Please retry.');
+      }
     } catch (error) {
+      buf.flush();
+      if (error.name === 'AbortError') return;
+
       const errMsg = error.message || 'Unknown error';
       setLastFailedQuery(queryText);
-      setApiStatus('offline');
+      // NOTE: deliberately does NOT set apiStatus to 'offline'. A failed agent
+      // call (unknown track, model timeout, empty response) is not the backend
+      // being unreachable; marking it offline disabled the input box and told
+      // the user to restart services.
       setMessages(prev => {
+        if (prev.length === 0) return prev;
         const updated = [...prev];
         updated[updated.length - 1] = {
           role: 'assistant',
           content: `⚠️ ${errMsg}`,
-          isError: true
+          isError: true,
         };
         return updated;
       });
     } finally {
+      buf.flush();
+      abortRef.current = null;
       setIsLoading(false);
     }
   };
@@ -147,7 +168,7 @@ const ChatSection = () => {
           <div className="flex items-center gap-1.5">
             <div className={`w-1.5 h-1.5 rounded-full ${statusConfig.color} ${statusConfig.pulse ? 'animate-pulse' : ''}`} />
             <span className={`text-[10px] font-bold uppercase tracking-tighter ${statusConfig.text}`}>
-              {apiStatus === 'offline' ? 'GROQ API OFFLINE' : `Groq Llama 3.1 · ${statusConfig.label}`}
+              {apiStatus === 'offline' ? `API OFFLINE · ${statusConfig.label}` : `Groq ${MODEL_LABEL} · ${statusConfig.label}`}
             </span>
           </div>
         </div>
@@ -157,7 +178,7 @@ const ChatSection = () => {
       {apiStatus === 'offline' && (
         <div className="px-4 py-2 bg-red-950/40 border-b border-red-500/20 flex items-center gap-2 text-red-400 text-[10px] font-mono">
           <WifiOff size={11} />
-          <span>Backend / Groq API unreachable. Run <code className="bg-black/40 px-1 rounded">.\start.ps1</code> to restart all services.</span>
+          <span>Backend unreachable at <code className="bg-black/40 px-1 rounded">{API_BASE}</code>. Start it with <code className="bg-black/40 px-1 rounded">.\start.ps1</code>.</span>
         </div>
       )}
 
