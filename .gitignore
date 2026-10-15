@@ -1,14 +1,40 @@
-# Python-generated files
+# --- Python ---
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 
-# Virtual environments
-.venv
-data/cache/
+# --- Node ---
+node_modules/
+apps/dashboard/dist/
+
+# --- Secrets ---
 .env
-node_modules
-./data/*
+.env.*
+!.env.example
+
+# --- F1 data ---
+# Regenerable / machine-local artifacts.
+# NOTE: this used to be written as "./data/*", which is NOT valid gitignore
+# syntax (leading ./) and therefore silently matched nothing -- that is why
+# the Chroma binary blobs and the FIA PDFs were committed and the pack grew
+# to ~96 MB.
+data/cache/
+data/chroma/
+
+# Still tracked on purpose:
+#   data/raw/**        - source FIA regulation PDFs; needed to rebuild Chroma
+#                        and required by the Docker/HF Spaces image.
+#   data/ml/           - generated training set, small and reviewable.
+#   storage/models/    - the trained XGBoost artifact the predictor loads at boot.
+
+# --- Tests ---
+tests/.pytest_tmp.db
