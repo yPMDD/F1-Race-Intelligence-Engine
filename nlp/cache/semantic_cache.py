@@ -61,12 +61,28 @@ class SemanticCache:
     def set(self, query: str, response: str):
         query_vec = self.embeddings.embed_query(query)
         vec_blob = np.array(query_vec, dtype=np.float32).tobytes()
-        
+
         self.conn.execute(
             "INSERT INTO cache (query, query_vector, response) VALUES (?, ?, ?)",
             (query, vec_blob, response)
         )
         self.conn.commit()
+
+    def invalidate_all(self) -> int:
+        """Drop every cached response. Returns the number of rows removed.
+
+        Called when race results are recorded: the agent's answers embed
+        pre-race state, and at a 0.92 similarity threshold a stale answer about
+        "who wins at X" will happily be served for the new question "who won
+        at X" after the race is over.
+        """
+        cur = self.conn.execute("DELETE FROM cache")
+        self.conn.commit()
+        return cur.rowcount
+
+    def count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM cache").fetchone()
+        return row[0] if row else 0
 
 # Singleton instance
 cache_instance = SemanticCache()

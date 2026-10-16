@@ -1,4 +1,6 @@
 import logging
+import time
+
 from storage.postgres.database import SessionLocal
 from storage.postgres.models import RaceModel, RacePrediction
 from nlp.agents.graph import run_f1_agent
@@ -6,43 +8,70 @@ from nlp.agents.graph import run_f1_agent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Precompute")
 
-def precompute_2026_season():
+
+def precompute_2026_season(force: bool = False):
+    """Re-simulate the remainder of the 2026 season, in round order.
+
+    Sequential by design: each race's forecast depends on the momentum and
+    points accumulated by every race before it, so round N+1 must be predicted
+    after round N is folded in.
+
+    Idempotent -- races that already have a stored forecast are skipped unless
+    `force` is set.
+    """
     from ml.predictor import F1Predictor
-    F1Predictor._stats_cache = None # Force refresh stats from DB
-    
+
+    # Driver form changed, so drop the memoised stats before the first call.
+    F1Predictor.invalidate_cache()
+
     db = SessionLocal()
     try:
-        # 1. Get all 2026 races
         races = db.query(RaceModel).filter(RaceModel.year == 2026).order_by(RaceModel.round_num).all()
-        logger.info(f"Found {len(races)} races in the 2026 season.")
+        logger.info("Found %d races in the 2026 season.", len(races))
 
+        simulated = 0
         for race in races:
-            # 2. Check if already predicted (Idempotent)
             exists = db.query(RacePrediction).filter(RacePrediction.race_id == race.id).first()
-            if exists:
-                logger.info(f"Skipping {race.name} (Already cached)")
+            if exists and not force:
+                logger.info("Skipping %s (already cached)", race.name)
                 continue
 
-            # 3. Run AI Simulation
-            logger.info(f"Simulating Strategy for: {race.name} Grand Prix...")
+            logger.info("Simulating strategy for %s...", race.name)
+            started = time.monotonic()
             try:
-                prompt = f"Predict the 2026 {race.name} Grand Prix finishing order."
-                prediction = run_f1_agent(prompt)
-                
-                new_pred = RacePrediction(
-                    race_id=race.id,
-                    prediction_text=prediction,
-                    model_version="v2_hybrid"
-                )
-                db.add(new_pred)
+                prediction = run_f1_agent(f"Predict the 2026 {race.name} Grand Prix finishing order.")
+
+                if not prediction:
+                    raise RuntimeError("agent returned an empty forecast")
+
+                if force and exists:
+                    exists.prediction_text = prediction
+                    exists.model_version = "v2_hybrid"
+                else:
+                    db.add(RacePrediction(
+                        race_id=race.id,
+                        prediction_text=prediction,
+                        model_version="v2_hybrid",
+                    ))
                 db.commit()
-                logger.info(f"Success: {race.name} prediction stored.")
-            except Exception as e:
-                logger.error(f"Failed to simulate {race.name}: {e}")
+                simulated += 1
+                logger.info(
+                    "Stored %s forecast in %.1fs",
+                    race.name, time.monotonic() - started,
+                )
+            except Exception:
+                # run_f1_agent now re-raises instead of returning a
+                # "Streaming error. Please retry." placeholder, so an
+                # upstream failure no longer poisons the predictions table.
+                logger.exception("Failed to simulate %s", race.name)
                 db.rollback()
 
+        logger.info("Season simulation complete: %d forecast(s) written.", simulated)
+        return simulated
     finally:
         db.close()
 
+
 if __name__ == "__main__":
-    precompute_2026_season()
+    import sys
+    precompute_2026_season(force="--force" in sys.argv)

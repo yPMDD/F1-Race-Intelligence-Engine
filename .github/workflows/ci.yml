@@ -1,0 +1,192 @@
+name: CI
+
+# Runs on every push and every PR. Nothing here may deploy -- that is
+# .github/workflows/deploy.yml's job, and it only fires from main.
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+concurrency:
+  # Cancel superseded runs on the same ref so a rapid series of pushes does not
+  # burn the runner minutes.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Verify the lockfile is in sync with pyproject.toml
+        # Catches someone adding a dependency without re-running `uv lock`,
+        # which would otherwise fail only at deploy time.
+        run: uv lock --check
+
+      - name: Run tests
+        env:
+          # The suite redirects DATABASE_URL to SQLite and installs a socket
+          # guard that fails any real network call, so this is hermetic.
+          DATABASE_URL: sqlite:///./ci.db
+          GROQ_API_KEY: ci-placeholder-not-a-real-key
+        run: uv run pytest -q
+
+      - name: Verify Alembic can build the schema from scratch
+        # An initial migration regenerated against a populated database comes
+        # out empty, which is a silent no-op on an empty production instance.
+        env:
+          DATABASE_URL: sqlite:///./ci_migration.db
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+      - name: Check for schema drift
+        # Needs the SAME database as the step above, and one that is actually
+        # at head -- `alembic check` errors with "Target database is not up to
+        # date" otherwise. Without an explicit env it falls back to the
+        # default localhost:5433 Postgres, which does not exist on a runner,
+        # so the check would silently be meaningless.
+        env:
+          DATABASE_URL: sqlite:///./ci_migration.db
+        run: |
+          uv run alembic upgrade head
+          if ! uv run alembic check; then
+            echo "::error::Models have changed without a migration."
+            echo "Run 'uv run alembic revision --autogenerate -m \"...\"' and commit it."
+            exit 1
+          fi
+          echo "::notice::no schema drift"
+
+      - name: Import smoke test
+        # Catches a module that only explodes on import (bad env handling,
+        # missing optional dependency) rather than in a test.
+        env:
+          DATABASE_URL: sqlite:///./ci.db
+        run: uv run python -c "import apps.api.main; print('app imports cleanly')"
+
+  frontend:
+    name: Frontend (vitest + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Production build
+        # Vercel runs exactly this command, so a failure here is a guaranteed
+        # failure in production. Better to catch it on the PR.
+        run: npm run build
+
+  docker:
+    name: Backend image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        # --build-arg BUILD_VECTORSTORE=false keeps the build quick; the real
+        # HF Spaces build still rebuilds the index when it is missing.
+        run: |
+          docker build \
+            --build-arg BUILD_VECTORSTORE=false \
+            --tag f1-engine:ci .
+
+      - name: Verify the container boots, migrates and serves /health
+        # The entrypoint now runs `alembic upgrade head` before serving, so this
+        # exercises the real start-up path: config check -> DB wait -> migrate
+        # -> uvicorn. SQLite stands in for Neon; the point is to prove the
+        # container reaches a healthy state, not to test Postgres.
+        run: |
+          docker run -d --name f1-ci -p 7860:7860 \
+            -e GROQ_API_KEY=ci-placeholder \
+            -e DATABASE_URL=sqlite:////tmp/f1-ci.db \
+            f1-engine:ci
+
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:7860/health; then
+              echo ""
+              echo "::notice::container healthy after $((i * 5))s"
+              docker rm -f f1-ci
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::container did not become healthy in 200s"
+          echo "---- container logs ----"
+          docker logs f1-ci || true
+          docker rm -f f1-ci || true
+          exit 1
+
+      - name: Verify the entrypoint refuses to start without config
+        # A container that boots with no API key and then 500s on the first
+        # request is worse than one that fails fast and loudly.
+        run: |
+          docker run --name f1-noconf -e DATABASE_URL=sqlite:////tmp/x.db f1-engine:ci \
+            >/tmp/noconf.log 2>&1 && rc=0 || rc=$?
+          docker rm -f f1-noconf || true
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::container started without GROQ_API_KEY"
+            exit 1
+          fi
+          if ! grep -q "GROQ_API_KEY" /tmp/noconf.log; then
+            echo "::error::expected a clear error naming GROQ_API_KEY; got:"
+            cat /tmp/noconf.log
+            exit 1
+          fi
+          echo "::notice::entrypoint fails fast without configuration"
+
+  secrets:
+    name: Secret leak check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure no credentials are tracked
+        run: |
+          if git ls-files | grep -Eq '(^|/)\.env$'; then
+            echo "::error::A .env file is tracked in git."
+            exit 1
+          fi
+          if git ls-files | grep -q '^data/chroma/'; then
+            echo "::error::The Chroma index is tracked; it must stay gitignored."
+            exit 1
+          fi
+          if git grep -I -l -E 'gsk_[A-Za-z0-9]{20,}' -- . ; then
+            echo "::error::A Groq API key appears in tracked content."
+            exit 1
+          fi
+          echo "::notice::no tracked secrets"

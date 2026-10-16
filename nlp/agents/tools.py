@@ -1,4 +1,6 @@
 import os
+import re
+from collections import Counter
 from langchain_core.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
@@ -13,6 +15,28 @@ logger = logging.getLogger(__name__)
 CHROMA_DIR = "data/chroma"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+# Weight given to the semantic channel when blending with the lexical one.
+# > 0.5 means "trust the embedding", which is what we want: the lexical pass
+# is there to break ties and rescue exact regulation terms ("768 kg",
+# "C6.1") that the embedding blurs, not to outvote it.
+HYBRID_SEMANTIC_WEIGHT = 0.7
+
+STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "what", "which",
+    "how", "of", "in", "on", "at", "to", "for", "and", "or", "do", "does", "did",
+    "it", "its", "as", "by", "that", "this", "these", "those", "there", "their",
+    "s", "t",
+}
+
+_WORD_RE = re.compile(r"[a-z0-9]+(?:[.\-][a-z0-9]+)*")
+
+# The FIA PDFs write magnitudes glued to their unit -- "726kg", "190kW",
+# "1900mm". A user asking about "726 kg" should match that, so we also emit
+# the numeric part as its own token. Internal '.'/'-' are deliberately kept
+# (article refs like C6.2 must survive intact), which is why this is a
+# post-process on the token rather than part of the regex.
+_NUM_UNIT_RE = re.compile(r"^(\d+(?:\.\d+)?)([a-z]+)$")
+
 # Shared embeddings instance (avoid reloading on every call)
 _embeddings = None
 _vectorstore = None
@@ -24,37 +48,100 @@ def _get_vectorstore():
         _vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=_embeddings)
     return _vectorstore, _embeddings
 
+
+def _tokenize(text: str) -> list:
+    """Lowercase, split on non-alphanumerics, drop stop words.
+
+    The previous implementation used `query.lower().split()`, which left
+    punctuation attached -- "What is the 2026 car weight?" yielded the token
+    '2026?', a string that can never occur in the document body.
+    """
+    tokens = []
+    for tok in _WORD_RE.findall(text.lower()):
+        if tok in STOP_WORDS:
+            continue
+        tokens.append(tok)
+        m = _NUM_UNIT_RE.match(tok)
+        if m:
+            # emit both halves too, so "726kg" matches a query for "726 kg"
+            tokens.append(m.group(1))
+            tokens.append(m.group(2))
+    return tokens
+
+
+def _lexical_score(terms: list, text: str, k1: float = 1.2, b: float = 0.75) -> float:
+    """Saturating BM25-style term-frequency score, normalised to roughly [0, 1].
+
+    Uses word-boundary tokens (not raw substring counts) and the standard
+    saturating denominator, so a term repeated 50 times cannot dominate a
+    document the way a plain count * 2 did. IDF is omitted deliberately: we
+    rank within a small over-fetched candidate pool rather than a corpus, so
+    per-term IDF over that pool is unstable and not worth the complexity.
+    """
+    if not terms:
+        return 0.0
+    tokens = _tokenize(text)
+    if not tokens:
+        return 0.0
+    tf = Counter(tokens)
+    doc_len = len(tokens)
+    total = 0.0
+    for term in terms:
+        f = tf.get(term, 0)
+        if not f:
+            continue
+        total += (f * (k1 + 1)) / (f + k1 * (1 - b + b * doc_len / 1500.0))
+    return total / len(terms)
+
+
 def _hybrid_search(query: str, year: int = 2026, k: int = 6) -> list:
     """
-    Hybrid search: combines semantic similarity + BM25-style keyword scoring.
+    Hybrid search: blends vector similarity with a BM25-style keyword score.
+
     Returns a deduplicated, re-ranked list of document chunks.
+
+    Previously this called `similarity_search`, which returns Documents with
+    *no* score attached, then ranked purely on `keyword_hits * 2`. The semantic
+    ordering was therefore discarded outright and a single incidental keyword
+    match outranked the best embedding match. We now ask Chroma for relevance
+    scores and blend both channels.
     """
     vectorstore, embeddings = _get_vectorstore()
 
-    # 1. Semantic search — retrieve top candidates
+    # 1. Semantic search with scores — over-fetch so reranking has room to work.
     sem_filter = {"year": year} if year else None
-    sem_docs = vectorstore.similarity_search(query, k=k * 2, filter=sem_filter)
+    fetch_k = max(k * 4, 20)
+    pairs = vectorstore.similarity_search_with_relevance_scores(
+        query, k=fetch_k, filter=sem_filter
+    )
+    if not pairs:
+        logger.warning("Hybrid search returned no candidates for %r", query)
+        return []
 
-    # 2. BM25-style keyword boosting: boost docs that contain exact query keywords
-    keywords = set(query.lower().split())
-    stop_words = {"the", "a", "is", "what", "how", "of", "in", "for", "and", "to"}
-    keywords -= stop_words
+    terms = _tokenize(query)
+    alpha = HYBRID_SEMANTIC_WEIGHT
 
+    # 2. Blend both channels, dedupe, rank.
+    #
+    # The relevance score is used as-is rather than min-max normalised across
+    # the candidate pool. Chroma guarantees it lies in [0, 1] with 1 = closest,
+    # and this collection is stored with space='l2', which compresses values
+    # into a narrow band (~0.24-0.32 across the 2026 regulations). That
+    # compression is *meaningful*: if the top candidates really are that
+    # similar, they should rank close together and let the lexical channel
+    # break the tie. Min-max rescaling would stretch a 0.01 spread into the
+    # full 0..1 range and amplify meaningless noise into a decisive ranking.
     scored_docs = []
     seen_content = set()
-    for doc in sem_docs:
-        content_lower = doc.page_content.lower()
-        # Count keyword hits for BM25 boost
-        keyword_hits = sum(1 for kw in keywords if kw in content_lower)
-        score = keyword_hits * 2  # BM25 boost weight
-        
-        # Deduplicate by content hash
-        content_hash = hash(doc.page_content[:100])
-        if content_hash not in seen_content:
-            seen_content.add(content_hash)
-            scored_docs.append((score, doc))
+    for doc, relevance in pairs:
+        content_hash = hash(doc.page_content[:200])
+        if content_hash in seen_content:
+            continue
+        seen_content.add(content_hash)
+        semantic = max(0.0, min(1.0, relevance))
+        lexical = _lexical_score(terms, doc.page_content)
+        scored_docs.append((alpha * semantic + (1 - alpha) * lexical, doc))
 
-    # 3. Sort: keyword-boosted docs first, then pure semantic
     scored_docs.sort(key=lambda x: x[0], reverse=True)
     return [doc for _, doc in scored_docs[:k]]
 

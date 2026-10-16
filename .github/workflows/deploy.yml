@@ -1,0 +1,253 @@
+name: Deploy
+
+# Auto-deploys to production on merge to main.
+#
+# Topology:
+#   Neon            (Postgres)  <- migrations run here, DIRECT connection
+#   Hugging Face    (FastAPI)   <- pushed as source; HF rebuilds the image
+#   Vercel          (React)     <- not handled here; it auto-deploys on the
+#                                   same main push via its own Git integration
+#
+# Ordering matters: the Space is redeployed only after migrations succeed, so
+# a new image never meets an old schema. The Space also runs `alembic upgrade
+# head` defensively at start-up, so a failed redeploy degrades to "old image,
+# new schema" rather than "new image, old schema".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    name: Migrate Neon
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      # Consumed by the deploy job to report the resulting revision.
+      revision: ${{ steps.migrate.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Apply migrations
+        env:
+          # Use the DIRECT Neon endpoint here, not the -pooler one.
+          # PgBouncer in transaction mode does not support SQL-level
+          # PREPARE/EXECUTE or session SET, which Alembic relies on.
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL_DIRECT }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::NEON_DATABASE_URL_DIRECT secret is not set."
+            exit 1
+          fi
+
+          # `alembic current` interleaves INFO log lines with its result, so
+          # match only a line that *starts* with the revision id. A loose
+          # `[0-9a-f]{10,}` also matches hex inside the log output.
+          current=$(uv run alembic current 2>/dev/null \
+            | grep -oE '^[0-9a-f]+ \(' | tr -d ' (' || true)
+          echo "current revision: ${current:-<none, fresh database>}"
+
+          uv run alembic upgrade head
+
+          rev=$(uv run alembic current 2>/dev/null \
+            | grep -oE '^[0-9a-f]+ \(' | tr -d ' (' || true)
+          if [ -z "$rev" ]; then
+            echo "::error::could not determine the schema revision after upgrading."
+            exit 1
+          fi
+          echo "revision=${rev}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Neon is now at ${rev}"
+
+      - name: Backfill schema on a throwaway database
+        # Proves the migration chain builds a complete schema from empty
+        # before it touches production, using a local Postgres service.
+        run: |
+          uv run python - <<'PY'
+          import os, sqlalchemy
+          url = "sqlite:///./migrate_check.db"
+          from alembic.config import Config
+          from alembic import command
+          cfg = Config("alembic.ini")
+          cfg.set_main_option("sqlalchemy.url", url)
+          command.upgrade(cfg, "head")
+          eng = sqlalchemy.create_engine(url)
+          tables = set(sqlalchemy.inspect(eng).get_table_names())
+          expected = {"races", "drivers", "laps", "results", "predictions"}
+          missing = expected - tables
+          if missing:
+              raise SystemExit(f"migration did not create: {missing}")
+          print("::notice::migration chain builds the full schema from empty")
+          PY
+
+  deploy-backend:
+    name: Deploy to Hugging Face Space
+    runs-on: ubuntu-latest
+    needs: migrate
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed to read the current Space HEAD before pushing.
+          fetch-depth: 0
+
+      - name: Detect deployment mode
+        # There are two valid ways to run a Space, and the pipeline must
+        # tolerate both:
+        #
+        #   push    -- the Space is an empty repo that we rsync source into.
+        #              Requires HF_TOKEN + HF_SPACE_REPO.
+        #   synced  -- the Space was created with "Import GitHub repo" and
+        #              auto-rebuilds whenever the default branch moves. This
+        #              merge already triggered it, so there is nothing to push.
+        #
+        # Failing hard on missing secrets would turn every deploy red for
+        # users in `synced` mode even though the Space deployed correctly.
+        id: mode
+        env:
+          SPACE_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
+        run: |
+          if [ -n "$SPACE_TOKEN" ] && [ -n "$SPACE_REPO" ]; then
+            echo "mode=push" >> "$GITHUB_OUTPUT"
+            echo "::notice::Space deploy mode: push ($SPACE_REPO)"
+          else
+            echo "mode=synced" >> "$GITHUB_OUTPUT"
+            echo "::notice::HF_TOKEN/HF_SPACE_REPO not set -- assuming the"
+            echo "::notice::Space auto-syncs from this repository's default"
+            echo "::notice::branch and rebuilding on its own. Set both values"
+            echo "::notice::to switch to push mode (docs/DEPLOYMENT.md §2)."
+          fi
+
+      - name: Clone the Space repository
+        # The Space is a SEPARATE git repo that mirrors this source. Pushing a
+        # commit to it is what triggers the HF build.
+        if: steps.mode.outputs.mode == 'push'
+        env:
+          SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
+          SPACE_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # HF_ACCESS_TOKEN is the credential name HF documents; SPACE_TOKEN is
+          # the Actions secret we reference.
+          git clone \
+            "https://hf_user:$SPACE_TOKEN@huggingface.co/spaces/$SPACE_REPO" \
+            space
+          cd space
+          # Start from the Space's current state so manual edits there are not
+          # clobbered wholesale.
+          git checkout -B main
+          echo "space HEAD before: $(git rev-parse --short HEAD)"
+
+      - name: Sync application source into the Space
+        if: steps.mode.outputs.mode == 'push'
+        working-directory: space
+        run: |
+          # Copy the deployable surface only. Tests, CI, scratch scripts and
+          # the dev-only dashboard are irrelevant to the running API.
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.venv' \
+            --exclude 'node_modules' \
+            --exclude 'tests' \
+            --exclude 'scratch' \
+            --exclude 'apps/dashboard' \
+            --exclude 'data/cache' \
+            --exclude 'data/chroma' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude '*.md' \
+            ../ .
+
+          # README.md carries the Space YAML frontmatter and must not be dropped.
+          # Restore just that file from the source repo.
+          cp ../README.md ./README.md
+
+          echo "files synced into the Space:"
+          git status --short | head -40
+
+      - name: Push
+        if: steps.mode.outputs.mode == 'push'
+        working-directory: space
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::nothing changed in the Space; skipping push."
+            exit 0
+          fi
+
+          git commit -m "deploy: ${GITHUB_SHA::8} from ${GITHUB_REF_NAME}"
+          git push origin main
+          echo "::notice::pushed $GITHUB_SHA"
+
+      - name: Wait for the Space build
+        # A HF push only *queues* a rebuild; it reports no outcome. Without
+        # this the workflow would claim success for an image that then failed
+        # to build. The script lives in this repo's checkout, not in the Space,
+        # so it runs from the default working directory.
+        #
+        # In `synced` mode we still poll: the merge already triggered a rebuild
+        # on HF's side, and reporting a real outcome is the whole point.
+        if: steps.mode.outputs.mode == 'push'
+        env:
+          SPACE: ${{ vars.HF_SPACE_REPO }}
+          TOKEN: ${{ secrets.HF_TOKEN }}
+        run: ./.github/wait_for_space.sh
+
+      - name: Health check the deployed Space
+        run: |
+          SPACE_REPO="${{ vars.HF_SPACE_REPO }}"
+          URL="https://${SPACE_REPO//\//-}.hf.space/health"
+          echo "checking ${URL}"
+
+          for i in $(seq 1 40); do
+            if curl -fsS "$URL"; then
+              echo ""
+              echo "::notice::Space is healthy"
+              exit 0
+            fi
+            sleep 15
+          done
+
+          echo "::warning::Space did not report healthy within 10 minutes."
+          echo "::warning::See https://huggingface.co/spaces/$SPACE_REPO"
+
+  summary:
+    name: Deploy summary
+    runs-on: ubuntu-latest
+    needs: [migrate, deploy-backend]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "### Production deploy"
+            echo ""
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Neon migrations | ${{ needs.migrate.result }} (rev \`${{ needs.migrate.outputs.revision || 'n/a' }}\`) |"
+            echo "| HF Space | ${{ needs.deploy-backend.result }} |"
+            echo "| Vercel | auto-deployed from the same \`main\` push |"
+            echo ""
+            echo "Commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
