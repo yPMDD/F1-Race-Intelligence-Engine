@@ -44,6 +44,19 @@ Both end with `?sslmode=require`.
 ### 2. Hugging Face
 
 1. Create a **Docker** Space, e.g. `yPMDD/f1-race-intelligence-engine`.
+
+   > **Which mode are you in?**
+   >
+   > - **Synced** — created with *Import GitHub repo*. HF rebuilds the Space
+   >   automatically whenever the **default branch** moves, so merging to
+   >   `main` is all that is needed. Leave `HF_TOKEN` / `HF_SPACE_REPO` unset;
+   >   the deploy job detects this and skips the push.
+   > - **Push** — created empty, with the deploy workflow rsyncing source into
+   >   it. Set both `HF_TOKEN` and `HF_SPACE_REPO`.
+   >
+   > This distinction matters: in *synced* mode the Space builds `main`, not
+   > `dev`, so **every fix is invisible until the PR is merged.**
+
 2. **Settings → Variables and secrets**:
 
    | Kind | Key | Value |
@@ -55,11 +68,16 @@ Both end with `?sslmode=require`.
    | Variable | `GROQ_MAX_TOKENS` | `800` |
    | Variable | `PORT` | `7860` |
 
-3. Create a Hugging Face **write token**: Settings → Access Tokens → *Write*.
-   This becomes the GitHub secret `HF_TOKEN`.
+   > ⚠️ **`CORS_ORIGINS` is not optional once a frontend is deployed.**
+   > `main` currently runs `allow_origins=["*"]`, which is why a deployed
+   > Vercel frontend works today. Merging this branch replaces that with a
+   > strict allow-list that defaults to localhost dev ports only. **Set
+   > `CORS_ORIGINS` to your Vercel domain BEFORE merging**, or the deployed
+   > frontend will start failing every request with a CORS error.
 
-> The Space's own git repo is created empty. The first deploy job clones it and
-> rsyncs the source in. Nothing needs to be pushed by hand.
+3. Only for **push** mode: create a Hugging Face **write token**
+   (Settings → Access Tokens → *Write*) and store it as the GitHub secret
+   `HF_TOKEN`.
 
 ### 3. GitHub
 

@@ -108,23 +108,38 @@ jobs:
           # Needed to read the current Space HEAD before pushing.
           fetch-depth: 0
 
-      - name: Fail fast if secrets are absent
+      - name: Detect deployment mode
+        # There are two valid ways to run a Space, and the pipeline must
+        # tolerate both:
+        #
+        #   push    -- the Space is an empty repo that we rsync source into.
+        #              Requires HF_TOKEN + HF_SPACE_REPO.
+        #   synced  -- the Space was created with "Import GitHub repo" and
+        #              auto-rebuilds whenever the default branch moves. This
+        #              merge already triggered it, so there is nothing to push.
+        #
+        # Failing hard on missing secrets would turn every deploy red for
+        # users in `synced` mode even though the Space deployed correctly.
+        id: mode
         env:
           SPACE_TOKEN: ${{ secrets.HF_TOKEN }}
           SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
         run: |
-          if [ -z "$SPACE_TOKEN" ]; then
-            echo "::error::HF_TOKEN secret is not set."
-            exit 1
-          fi
-          if [ -z "$SPACE_REPO" ]; then
-            echo "::error::HF_SPACE_REPO variable is not set (e.g. yPMDD/f1-race-intelligence-engine)."
-            exit 1
+          if [ -n "$SPACE_TOKEN" ] && [ -n "$SPACE_REPO" ]; then
+            echo "mode=push" >> "$GITHUB_OUTPUT"
+            echo "::notice::Space deploy mode: push ($SPACE_REPO)"
+          else
+            echo "mode=synced" >> "$GITHUB_OUTPUT"
+            echo "::notice::HF_TOKEN/HF_SPACE_REPO not set -- assuming the"
+            echo "::notice::Space auto-syncs from this repository's default"
+            echo "::notice::branch and rebuilding on its own. Set both values"
+            echo "::notice::to switch to push mode (docs/DEPLOYMENT.md §2)."
           fi
 
       - name: Clone the Space repository
         # The Space is a SEPARATE git repo that mirrors this source. Pushing a
         # commit to it is what triggers the HF build.
+        if: steps.mode.outputs.mode == 'push'
         env:
           SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
           SPACE_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -144,6 +159,7 @@ jobs:
           echo "space HEAD before: $(git rev-parse --short HEAD)"
 
       - name: Sync application source into the Space
+        if: steps.mode.outputs.mode == 'push'
         working-directory: space
         run: |
           # Copy the deployable surface only. Tests, CI, scratch scripts and
@@ -171,6 +187,7 @@ jobs:
           git status --short | head -40
 
       - name: Push
+        if: steps.mode.outputs.mode == 'push'
         working-directory: space
         run: |
           git add -A
@@ -188,6 +205,10 @@ jobs:
         # this the workflow would claim success for an image that then failed
         # to build. The script lives in this repo's checkout, not in the Space,
         # so it runs from the default working directory.
+        #
+        # In `synced` mode we still poll: the merge already triggered a rebuild
+        # on HF's side, and reporting a real outcome is the whole point.
+        if: steps.mode.outputs.mode == 'push'
         env:
           SPACE: ${{ vars.HF_SPACE_REPO }}
           TOKEN: ${{ secrets.HF_TOKEN }}
