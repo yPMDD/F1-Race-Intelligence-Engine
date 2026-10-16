@@ -46,6 +46,15 @@ dev = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
+# The repo root must be importable: `storage`, `ml`, `nlp` and `apps` are
+# top-level namespace packages, and there are no __init__.py files anywhere
+# (PEP 420), so nothing anchors them.
+#
+# `python -m pytest` happens to work because the `-m` form puts the CWD on
+# sys.path. The bare `pytest` console script does NOT -- which is why CI failed
+# with "No module named 'storage'" while the same suite passed locally every
+# time. Declaring it here makes both invocations equivalent.
+pythonpath = ["."]
 
 [tool.uv]
 package = false

@@ -59,12 +59,21 @@ jobs:
           uv run alembic upgrade head
 
       - name: Check for schema drift
+        # Needs the SAME database as the step above, and one that is actually
+        # at head -- `alembic check` errors with "Target database is not up to
+        # date" otherwise. Without an explicit env it falls back to the
+        # default localhost:5433 Postgres, which does not exist on a runner,
+        # so the check would silently be meaningless.
+        env:
+          DATABASE_URL: sqlite:///./ci_migration.db
         run: |
-          uv run alembic check || (
+          uv run alembic upgrade head
+          if ! uv run alembic check; then
             echo "::error::Models have changed without a migration."
             echo "Run 'uv run alembic revision --autogenerate -m \"...\"' and commit it."
             exit 1
-          )
+          fi
+          echo "::notice::no schema drift"
 
       - name: Import smoke test
         # Catches a module that only explodes on import (bad env handling,

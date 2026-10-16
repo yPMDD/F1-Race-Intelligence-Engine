@@ -58,12 +58,21 @@ jobs:
             exit 1
           fi
 
-          current=$(uv run alembic current 2>/dev/null | grep -oE '[0-9a-f]{10,}' | head -1 || true)
-          echo "current revision: ${current:-<none>}"
+          # `alembic current` interleaves INFO log lines with its result, so
+          # match only a line that *starts* with the revision id. A loose
+          # `[0-9a-f]{10,}` also matches hex inside the log output.
+          current=$(uv run alembic current 2>/dev/null \
+            | grep -oE '^[0-9a-f]+ \(' | tr -d ' (' || true)
+          echo "current revision: ${current:-<none, fresh database>}"
 
           uv run alembic upgrade head
 
-          rev=$(uv run alembic current | grep -oE '[0-9a-f]{10,}' | head -1)
+          rev=$(uv run alembic current 2>/dev/null \
+            | grep -oE '^[0-9a-f]+ \(' | tr -d ' (' || true)
+          if [ -z "$rev" ]; then
+            echo "::error::could not determine the schema revision after upgrading."
+            exit 1
+          fi
           echo "revision=${rev}" >> "$GITHUB_OUTPUT"
           echo "::notice::Neon is now at ${rev}"
 
