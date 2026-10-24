@@ -1,0 +1,34 @@
+# Normalise line endings.
+#
+# The Docker build and the CI workflows run on Linux. Without this, a Windows
+# checkout with core.autocrlf=true can hand the Docker daemon a Dockerfile whose
+# RUN continuations contain CR, which fails in ways that are very hard to
+# diagnose from the build log alone.
+
+* text=auto eol=lf
+
+# Files that must stay LF for scripts to execute at all.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows-only helpers.
+*.ps1 text eol=crlf
+
+# Never touch binary assets.
+*.png binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.joblib binary
+*.db binary
+*.sqlite3 binary
+*.bin binary
+*.pickle binary
+
+# Lockfiles and generated data: keep whatever they are.
+uv.lock -text
+package-lock.json -text
+data/ml/*.csv -text
