@@ -78,17 +78,18 @@ jobs:
 
       - name: Backfill schema on a throwaway database
         # Proves the migration chain builds a complete schema from empty
-        # before it touches production, using a local Postgres service.
+        # before it touches production, using a local SQLite database.
+        # Must set DATABASE_URL env var because alembic/env.py reads it at import time.
+        env:
+          DATABASE_URL: sqlite:///./migrate_check.db
         run: |
           uv run python - <<'PY'
           import os, sqlalchemy
-          url = "sqlite:///./migrate_check.db"
           from alembic.config import Config
           from alembic import command
           cfg = Config("alembic.ini")
-          cfg.set_main_option("sqlalchemy.url", url)
           command.upgrade(cfg, "head")
-          eng = sqlalchemy.create_engine(url)
+          eng = sqlalchemy.create_engine(os.environ["DATABASE_URL"])
           tables = set(sqlalchemy.inspect(eng).get_table_names())
           expected = {"races", "drivers", "laps", "results", "predictions"}
           missing = expected - tables
