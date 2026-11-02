@@ -80,14 +80,14 @@ def predict_race_result(race_id: int, db: Session = Depends(get_db)):
         # failure marker so the dashboard never mistakes this for a forecast.
         logger.exception("Prediction failed for race %s", race_id)
         return {
-            "prediction": "We could not generate a forecast right now. Please try again later.",
+            "prediction": "We couldn't generate a forecast right now. Please try again later.",
             "source": "error",
         }
 
     if not prediction:
         logger.error("Agent returned an empty prediction for race %s", race_id)
         return {
-            "prediction": "We could not generate a forecast right now. Please try again later.",
+            "prediction": "We couldn't generate a forecast right now. Please try again later.",
             "source": "error",
         }
 
