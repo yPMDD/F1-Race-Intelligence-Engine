@@ -4,9 +4,6 @@ import { createSseReader, createTokenBuffer } from '../lib/sse';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-// Keep in sync with DEFAULT_MODEL in nlp/agents/graph.py.
-const MODEL_LABEL = 'qwen3.8-27b';
-
 const ChatSection = () => {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: 'Race Intelligence Engine online. Standing by for telemetry analysis or regulation queries for the 2026 season.' }
@@ -118,7 +115,6 @@ const ChatSection = () => {
       buf.flush();
       if (error.name === 'AbortError') return;
 
-      const errMsg = error.message || 'Unknown error';
       setLastFailedQuery(queryText);
       // NOTE: deliberately does NOT set apiStatus to 'offline'. A failed agent
       // call (unknown track, model timeout, empty response) is not the backend
@@ -129,7 +125,7 @@ const ChatSection = () => {
         const updated = [...prev];
         updated[updated.length - 1] = {
           role: 'assistant',
-          content: `⚠️ ${errMsg}`,
+          content: 'The strategist could not complete that request. Please try again in a moment.',
           isError: true,
         };
         return updated;
@@ -168,7 +164,7 @@ const ChatSection = () => {
           <div className="flex items-center gap-1.5">
             <div className={`w-1.5 h-1.5 rounded-full ${statusConfig.color} ${statusConfig.pulse ? 'animate-pulse' : ''}`} />
             <span className={`text-[10px] font-bold uppercase tracking-tighter ${statusConfig.text}`}>
-              {apiStatus === 'offline' ? `API OFFLINE · ${statusConfig.label}` : `Groq ${MODEL_LABEL} · ${statusConfig.label}`}
+              {apiStatus === 'offline' ? `STRATEGIST UNAVAILABLE · ${statusConfig.label}` : `Race Strategist · ${statusConfig.label}`}
             </span>
           </div>
         </div>
@@ -178,7 +174,7 @@ const ChatSection = () => {
       {apiStatus === 'offline' && (
         <div className="px-4 py-2 bg-red-950/40 border-b border-red-500/20 flex items-center gap-2 text-red-400 text-[10px] font-mono">
           <WifiOff size={11} />
-          <span>Backend unreachable at <code className="bg-black/40 px-1 rounded">{API_BASE}</code>. Start it with <code className="bg-black/40 px-1 rounded">.\start.ps1</code>.</span>
+          <span>The strategist is temporarily unavailable. Please try again in a moment.</span>
         </div>
       )}
 

@@ -82,9 +82,10 @@ async def chat_with_agent(query: AgentQuery):
                 cache_instance.set(query.prompt, full_response)
 
             yield "data: [DONE]\n\n"
-        except Exception as exc:
+        except Exception:
             logger.exception("Agent execution failed")
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            # Provider details and stack traces belong in server logs only.
+            yield f"data: {json.dumps({'error': 'The strategist could not complete that request. Please try again.'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream_agent(), media_type="text/event-stream")

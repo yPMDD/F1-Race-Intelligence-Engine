@@ -109,11 +109,11 @@ def test_chat_streams_tokens_then_done(client, monkeypatch):
     assert "".join(tokens) == "VER wins."
 
 
-def test_chat_surfaces_agent_errors(client, monkeypatch):
+def test_chat_hides_agent_error_details_from_users(client, monkeypatch):
     import nlp.agents.graph as graph_mod
 
     async def boom(prompt):
-        raise RuntimeError("model unavailable")
+        raise RuntimeError("SECRET_PROVIDER_KEY=hidden model unavailable")
         yield  # pragma: no cover
 
     monkeypatch.setattr(graph_mod, "run_f1_agent_stream", boom)
@@ -121,7 +121,10 @@ def test_chat_surfaces_agent_errors(client, monkeypatch):
     r = client.post("/agent/chat", json={"prompt": "x"})
     frames = _frames(r.text)
     assert frames[-1] == "[DONE]"
-    assert "model unavailable" in frames[0]
+    payload = json.loads(frames[0])
+    assert payload["error"] == "The strategist could not complete that request. Please try again."
+    assert "SECRET_PROVIDER_KEY" not in frames[0]
+    assert "model unavailable" not in frames[0]
 
 
 def test_chat_serves_from_cache_on_second_identical_call(client, monkeypatch):

@@ -162,8 +162,9 @@ def query_f1_regulations(query: str, year: int = 2026) -> str:
             for d in docs
         ])
         return context
-    except Exception as e:
-        return f"Error querying regulations: {str(e)}"
+    except Exception:
+        logger.exception("Regulation search tool failed")
+        return "Regulation search is temporarily unavailable. Continue without relying on unverified rule details."
 
 @tool
 def get_track_history(track_name: str) -> str:
@@ -192,8 +193,9 @@ def get_track_history(track_name: str) -> str:
                     summary += f"- P{res.position}: {res.driver_id} (Status: {res.status})\n"
                     
         return summary
-    except Exception as e:
-        return f"Error retrieving track history: {str(e)}"
+    except Exception:
+        logger.exception("Track history tool failed for %s", track_name)
+        return "Historical track data is temporarily unavailable."
     finally:
         db.close()
 
@@ -243,8 +245,9 @@ def get_race_telemetry_summary(year: int, race_name: str, driver_name: str = Non
                     summary += f"- Best Lap: {min(times)/1000.0:.3f}s\n"
             
         return summary
-    except Exception as e:
-        return f"Error retrieving telemetry: {str(e)}"
+    except Exception:
+        logger.exception("Telemetry tool failed for %s %s", year, race_name)
+        return "Race telemetry is temporarily unavailable."
     finally:
         db.close()
 
@@ -265,5 +268,6 @@ def get_ml_prediction(track_name: str) -> str:
             summary += f"P{res['final_pos']}|{res['driver_id']}|{res['team']}|SCORE:{res['score']:.2f}\n"
             
         return summary
-    except Exception as e:
-        return f"Error running ML model: {str(e)}"
+    except Exception:
+        logger.exception("ML prediction tool failed for %s", track_name)
+        return "The prediction model is temporarily unavailable."
