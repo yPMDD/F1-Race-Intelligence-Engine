@@ -34,8 +34,8 @@ def get_available_years(db: Session = Depends(get_db)):
         years = [int(y[0]) for y in years_tuples if y[0] is not None]
         return sorted(years, reverse=True)
     except Exception as e:
-        logger.error(f"Error in get_available_years: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to retrieve available race years")
+        raise HTTPException(status_code=500, detail="Unable to load race seasons") from e
 
 
 @router.get("/by-year/{year}", response_model=List[Race])
@@ -76,18 +76,20 @@ def predict_race_result(race_id: int, db: Session = Depends(get_db)):
     try:
         prediction = run_f1_agent(prompt)
     except Exception as e:
-        # Previously this swallowed the failure and returned a "[AI] Unable to
-        # generate prediction" string with source="ai" -- indistinguishable
-        # from a real forecast to the dashboard, which renders it as one.
+        # Keep provider/database details in server logs, and return a safe
+        # failure marker so the dashboard never mistakes this for a forecast.
         logger.exception("Prediction failed for race %s", race_id)
         return {
-            "prediction": f"[AI] Unable to generate prediction at this time ({e}).",
+            "prediction": "We could not generate a forecast right now. Please try again later.",
             "source": "error",
         }
 
     if not prediction:
-        logger.error("Empty prediction for race %s", race_id)
-        return {"prediction": "[AI] Model returned an empty response.", "source": "error"}
+        logger.error("Agent returned an empty prediction for race %s", race_id)
+        return {
+            "prediction": "We could not generate a forecast right now. Please try again later.",
+            "source": "error",
+        }
 
     db.add(
         RacePrediction(

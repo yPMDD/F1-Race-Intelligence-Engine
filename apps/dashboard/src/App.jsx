@@ -18,6 +18,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, mins: 0, secs: 0 });
   const [prediction, setPrediction] = useState(null);
+  const [predictionError, setPredictionError] = useState(null);
   const [predicting, setPredicting] = useState(false);
 
   // 1. Initial Load: Fetch Available Years
@@ -47,6 +48,7 @@ function App() {
     if (!selectedRace) return;
     setLoading(true);
     setPrediction(null); // Clear old prediction
+    setPredictionError(null);
     fetch(`${API_BASE}/races/${selectedRace.id}/laps`)
       .then(res => res.json())
       .then(data => {
@@ -82,12 +84,20 @@ function App() {
   const handlePredict = async () => {
     if (!selectedRace) return;
     setPredicting(true);
+    setPredictionError(null);
     try {
       const res = await fetch(`${API_BASE}/races/${selectedRace.id}/predict`, { method: 'POST' });
       const data = await res.json();
-      setPrediction(data.prediction);
-    } catch (err) {
-      console.error("Prediction failed:", err);
+      const text = (data.prediction || '').trim();
+      if (data.source === 'error' || !text || text.startsWith('[AI]') || !text.includes('|')) {
+        setPrediction(null);
+        setPredictionError('We could not generate a forecast right now. Please try again later.');
+      } else {
+        setPrediction(data.prediction);
+      }
+    } catch {
+      setPrediction(null);
+      setPredictionError('Forecasting is temporarily unavailable. Please try again in a moment.');
     } finally {
       setPredicting(false);
     }
@@ -222,6 +232,16 @@ function App() {
                       <Line type="monotone" dataKey="lap_time_ms" stroke="#ff1801" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
+                ) : predictionError ? (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6">
+                    <div className="flex items-center gap-2 bg-red-950/40 border border-red-500/20 px-4 py-3 rounded-lg max-w-md">
+                      <AlertCircle size={16} className="text-red-400 shrink-0" />
+                      <span className="text-xs font-mono text-red-300">{predictionError}</span>
+                    </div>
+                    <button onClick={handlePredict} disabled={predicting} className="flex items-center gap-1.5 px-3 py-1 bg-f1-red/10 hover:bg-f1-red/20 border border-f1-red/20 rounded text-[9px] font-black text-f1-red uppercase tracking-widest transition-all disabled:opacity-50">
+                      {predicting ? 'Retrying...' : 'Retry Prediction'}
+                    </button>
+                  </div>
                 ) : predictionTable ? (
                   <div className="flex-1 flex flex-col overflow-hidden">
                     <div className="flex items-center gap-2 mb-4 bg-f1-red/10 border border-f1-red/20 p-3 rounded-lg shrink-0">

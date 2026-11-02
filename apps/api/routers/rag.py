@@ -27,8 +27,8 @@ def get_vectorstore():
         try:
             embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
             _vectorstore = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-        except Exception as e:
-            logger.error(f"Failed to initialize Chroma: {str(e)}")
+        except Exception:
+            logger.exception("Failed to initialize Chroma")
             raise HTTPException(status_code=500, detail="Vector store unavailable")
     return _vectorstore
 
@@ -66,5 +66,5 @@ def query_documents(request: QueryRequest):
         return QueryResponse(query=request.query, results=results)
         
     except Exception as e:
-        logger.error(f"Error during similarity search: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error during regulation search")
+        raise HTTPException(status_code=500, detail="Unable to search regulations right now") from e

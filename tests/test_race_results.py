@@ -172,7 +172,7 @@ def test_predict_failure_is_reported_not_guessed(client, db, monkeypatch):
     import nlp.agents.graph as graph_mod
 
     def boom(prompt):
-        raise RuntimeError("groq unavailable")
+        raise RuntimeError("SECRET_PROVIDER_KEY=hidden groq unavailable")
 
     monkeypatch.setattr(graph_mod, "run_f1_agent", boom)
     race = seed_race(db, 2026, 20, "Las Vegas Grand Prix", SAMPLE_RESULTS_2026)
@@ -182,7 +182,9 @@ def test_predict_failure_is_reported_not_guessed(client, db, monkeypatch):
     body = r.json()
     # Must not be presented as a real forecast to the dashboard.
     assert body["source"] == "error"
-    assert "groq unavailable" in body["prediction"]
+    assert body["prediction"] == "We couldn't generate a forecast right now. Please try again later."
+    assert "SECRET_PROVIDER_KEY" not in body["prediction"]
+    assert "groq unavailable" not in body["prediction"]
 
 
 def test_predict_persists_a_successful_forecast(client, db, monkeypatch):
